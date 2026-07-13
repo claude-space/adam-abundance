@@ -1,0 +1,52 @@
+{
+  "name": "nextjs-dashboard",
+  "display_name": "Dashboard (Next.js)",
+  "description": "Next.js App Router dashboard agent — server components reading from Supabase, Tailwind styling, dark-mode-aware. Matches the writers-dashboard / sales-dashboard / news-reader pattern. Visible at /agents/<slug>/ once provisioned; workflow steps can call its /api/data endpoint to consume the same data as JSON.",
+  "category": "starter",
+  "language": "typescript",
+  "framework": "nextjs",
+  "tags": [
+    "dashboard",
+    "nextjs",
+    "supabase",
+    "valnet-ops",
+    "viewable",
+    "app-router"
+  ],
+  "endpoints": [
+    {
+      "path": "/",
+      "method": "GET",
+      "description": "The dashboard UI (HTML). Visible at /agents/<slug>/ on shellagent.io."
+    },
+    {
+      "path": "/api/data",
+      "method": "GET",
+      "description": "JSON version of the dashboard's data — for workflow consumption."
+    },
+    {
+      "path": "/api/health",
+      "method": "GET",
+      "description": "Liveness probe."
+    }
+  ],
+  "workflow_integration": {
+    "callable_as_agent": true,
+    "output_shape_from_api_data": {
+      "rows": "array — main dataset",
+      "summary": "object — aggregates / counts / metrics for chaining"
+    },
+    "example_workflow": [
+      "Workflow: 'Daily dashboard digest'",
+      "1. Trigger: cron, 9am weekdays",
+      "2. Agent step: call this dashboard agent's /api/data",
+      "3. fastapi-llm-agent step: summarize {{previous_output.summary}}",
+      "4. slack.message.send: post {{previous_output.text}} to #ops"
+    ]
+  },
+  "post_provision_notes": [
+    "This agent uses Caddy strip_prefix routing — the dashboard runs locally at /, but Caddy serves it under /agents/<slug>/.",
+    "All internal links must go through the BP() helper in src/lib/bp.ts so they pick up the basePath correctly.",
+    "If you point this at a different Supabase project than SHA's own, set SUPABASE_URL + SUPABASE_ANON_KEY in .env."
+  ]
+}
