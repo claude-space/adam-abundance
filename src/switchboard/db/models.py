@@ -1,0 +1,189 @@
+"""Shared-memory ORM models — the reference DDL from PRD §7.2 / §7.3.
+
+Five tables:
+  * ``memory_entry``   — the heart of the system; typed, provenance-carrying,
+                         brand-scoped, TTL-bearing entries every agent reads/writes.
+  * ``plan`` / ``plan_item`` — the orchestrator's daily plan + its ranked items,
+                         carrying the human-approval fields the governor enforces.
+  * ``tool_call_log``  — per external tool call: provenance + spend (mirrors
+                         Seona's AgentUsage / HC-Viral's AgentEvent).
+  * ``spend_ledger``   — rolling spend the governor's caps read from.
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM, JSONB
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from .base import Base
+from .enums import EntryType
+
+# Native Postgres ENUM for memory_entry.type. create_type=True lets a bare
+# Base.metadata.create_all() bootstrap it (dev/tests); the Alembic migration
+# manages it explicitly with create_type=False to control ordering.
+entry_type_enum = ENUM(
+    EntryType,
+    name="entry_type",
+    create_type=True,
+    values_callable=lambda e: [m.value for m in e],
+)
+
+
+class MemoryEntry(Base):
+    __tablename__ = "memory_entry"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    type: Mapped[EntryType] = mapped_column(entry_type_enum, nullable=False)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)  # hotcars|carbuzz|topspeed|portfolio
+    source_agent: Mapped[str] = mapped_column(Text, nullable=False)
+    source_system: Mapped[str | None] = mapped_column(Text)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    confidence: Mapped[float | None] = mapped_column(Float)
+    source_urls: Mapped[list[str] | None] = mapped_column(ARRAY(Text))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="active", server_default="active")
+
+    __table_args__ = (
+        Index("ix_memory_entry_brand_type_created", "brand", "type", "created_at"),
+        Index("ix_memory_entry_payload_gin", "payload", postgresql_using="gin"),
+        Index("ix_memory_entry_status", "status"),
+        Index("ix_memory_entry_expires_at", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<MemoryEntry id={self.id} type={self.type} brand={self.brand} "
+            f"agent={self.source_agent} verified={self.verified} status={self.status}>"
+        )
+
+
+class Plan(Base):
+    __tablename__ = "plan"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_date: Mapped[date] = mapped_column(Date, nullable=False)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    created_by: Mapped[str] = mapped_column(
+        Text, nullable=False, default="orchestrator", server_default="orchestrator"
+    )
+    approved_by: Mapped[str | None] = mapped_column(Text)  # editor/admin identity (Google SSO email)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    items: Mapped[list["PlanItem"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan", order_by="PlanItem.rank"
+    )
+
+    __table_args__ = (Index("ix_plan_date_brand", "plan_date", "brand"),)
+
+    def __repr__(self) -> str:
+        return f"<Plan id={self.id} date={self.plan_date} brand={self.brand} status={self.status}>"
+
+
+class PlanItem(Base):
+    __tablename__ = "plan_item"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    plan_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("plan.id", ondelete="CASCADE")
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    assigned_agent: Mapped[str] = mapped_column(Text, nullable=False)
+    action_type: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="proposed", server_default="proposed"
+    )
+    # Dry-run by default (PRD §8): live writes require an approved item to flip this.
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    cost_estimate: Mapped[dict | None] = mapped_column(JSONB)  # {ahrefs_units, llm_micros, bq_bytes}
+    result_ref: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    plan: Mapped[Plan | None] = relationship(back_populates="items")
+
+    __table_args__ = (Index("ix_plan_item_plan_status", "plan_id", "status"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<PlanItem id={self.id} rank={self.rank} action={self.action_type} "
+            f"agent={self.assigned_agent} status={self.status} dry_run={self.dry_run}>"
+        )
+
+
+class ToolCallLog(Base):
+    __tablename__ = "tool_call_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    agent: Mapped[str] = mapped_column(Text, nullable=False)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)  # 'read' | 'act'
+    brand: Mapped[str | None] = mapped_column(Text)
+    dry_run: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    request: Mapped[dict | None] = mapped_column(JSONB)  # SECRET-REDACTED before persistence
+    ok: Mapped[bool | None] = mapped_column(Boolean)
+    cost: Mapped[dict | None] = mapped_column(JSONB)  # {ahrefs_units, llm_micros, bq_bytes, usd}
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_tool_call_log_agent_created", "agent", "created_at"),)
+
+
+class AppUser(Base):
+    """A human who can sign in. Google/dev identity maps here to a role that
+    gates approvals (PRD §9.1). Not a resource credential — attribution only."""
+
+    __tablename__ = "app_user"
+
+    email: Mapped[str] = mapped_column(Text, primary_key=True)
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="viewer", server_default="viewer")
+    brands: Mapped[list[str] | None] = mapped_column(ARRAY(Text))  # brand_user scope
+    name: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    def __repr__(self) -> str:
+        return f"<AppUser {self.email} role={self.role}>"
+
+
+class SpendLedger(Base):
+    __tablename__ = "spend_ledger"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    window_date: Mapped[date] = mapped_column(Date, nullable=False)
+    metric: Mapped[str] = mapped_column(Text, nullable=False)  # ahrefs_units | llm_micros | bq_bytes
+    amount: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    agent: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_spend_ledger_window_metric", "window_date", "metric"),)

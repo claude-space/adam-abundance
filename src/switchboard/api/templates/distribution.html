@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Distribution — Switchboard{% endblock %}
+{% block body %}
+
+{% set chan_colors = {'digest': '#5b9dff', 'newsletter': '#ec6cb0', 'social': '#26c6a6'} %}
+{% set n_digest = channels.digest or 0 %}
+{% set n_newsletter = channels.newsletter or 0 %}
+{% set n_social = channels.social or 0 %}
+{% set chan_total = n_digest + n_newsletter + n_social %}
+
+<div class="phero rise" style="--ph:#ec6cb0">
+  <h2>
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </span>
+    Distribution
+  </h2>
+  <div class="ph-sub">Assembled artifacts staged for human review — draft + human-send. Nothing goes out autonomously.</div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      <b>{{ items|length }}</b> artifacts
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <b>{{ assembled }}</b> assembled
+    </span>
+    <span class="pillx"><span class="adot" style="background:#5b9dff;margin-right:0"></span> <b>{{ n_digest }}</b> digest</span>
+    <span class="pillx"><span class="adot" style="background:#ec6cb0;margin-right:0"></span> <b>{{ n_newsletter }}</b> newsletter</span>
+    <span class="pillx"><span class="adot" style="background:#26c6a6;margin-right:0"></span> <b>{{ n_social }}</b> social</span>
+  </div>
+</div>
+
+<div class="grid rise-2" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin-bottom:16px">
+  <div class="card kpi tile" style="--c:#5b9dff">
+    <div class="k-top">
+      <span class="k-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-10 5L2 7"/></svg>
+      </span>
+      <span class="label">Digest</span>
+    </div>
+    <div class="num">{{ n_digest }}</div>
+    <div class="foot">Governor-gated email · dry-run by default</div>
+  </div>
+  <div class="card kpi tile" style="--c:#ec6cb0">
+    <div class="k-top">
+      <span class="k-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      </span>
+      <span class="label">Newsletter</span>
+    </div>
+    <div class="num">{{ n_newsletter }}</div>
+    <div class="foot">Draft HTML · copy out to your ESP</div>
+  </div>
+  <div class="card kpi tile" style="--c:#26c6a6">
+    <div class="k-top">
+      <span class="k-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="8.59" y1="10.49" x2="15.42" y2="6.51"/></svg>
+      </span>
+      <span class="label">Social</span>
+    </div>
+    <div class="num">{{ n_social }}</div>
+    <div class="foot">PNG drafts · download and post manually</div>
+  </div>
+  <div class="card" style="display:flex;align-items:center;gap:18px">
+    {% if chan_total > 0 %}
+    {% set d1 = (n_digest / chan_total * 360)|round(1) %}
+    {% set d2 = ((n_digest + n_newsletter) / chan_total * 360)|round(1) %}
+    <div class="donut" style="background:conic-gradient(#5b9dff 0 {{ d1 }}deg, #ec6cb0 {{ d1 }}deg {{ d2 }}deg, #26c6a6 {{ d2 }}deg 360deg)">
+      <div class="d-inner"><div><div class="d-val">{{ chan_total }}</div><div class="d-lbl">by channel</div></div></div>
+    </div>
+    {% else %}
+    <div class="donut" style="background:var(--surface-3)">
+      <div class="d-inner"><div><div class="d-val">0</div><div class="d-lbl">by channel</div></div></div>
+    </div>
+    {% endif %}
+    <div class="legend">
+      <div class="l-row"><span class="adot" style="background:#5b9dff"></span> digest <b>{{ n_digest }}</b></div>
+      <div class="l-row"><span class="adot" style="background:#ec6cb0"></span> newsletter <b>{{ n_newsletter }}</b></div>
+      <div class="l-row"><span class="adot" style="background:#26c6a6"></span> social <b>{{ n_social }}</b></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel rise-3" style="border-left:3px solid var(--warn)">
+  <h3>
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--warn)" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/></svg>
+    Human-send guardrail
+    <span class="hint muted">§6.6</span>
+  </h3>
+  <p style="margin:0;color:var(--ink-2)">Switchboard <b>assembles</b> the daily digest, CarBuzz newsletter, and social
+  posts — then stops. A human reviews and sends. The digest email is a governor-gated action (dry-run by default);
+  newsletter HTML and social PNGs are draft artifacts you copy out or download. No send/post integration exists.</p>
+</div>
+
+<div class="panel rise-4">
+  <h3>Outbound artifacts <span class="hint muted">{{ items|length }} staged for review</span></h3>
+  <table>
+    <tr><th>Artifact</th><th>Brand</th><th>Channel</th><th>Status</th><th>Artifact ref</th><th>When</th></tr>
+    {% for it in items %}
+    <tr>
+      <td><span class="adot" style="background:{{ type_color(it.type) }}"></span><span style="font-weight:600">{{ it.label }}</span></td>
+      <td>{{ it.brand }}</td>
+      <td><span class="chip act" style="--c:{{ chan_colors.get(it.channel, 'var(--accent)') }}">{{ it.channel }}</span></td>
+      <td>{% if it.status in ['assembled','ready'] %}<span class="badge ok">{{ it.status }}</span>
+          {% else %}<span class="badge muted">{{ it.status }}</span>{% endif %}</td>
+      <td>{% if it.artifact_url %}<a href="{{ it.artifact_url }}" target="_blank" rel="noopener">open artifact{% if it.bytes %} · {{ (it.bytes/1024)|round(1) }} KB{% endif %}</a>
+          {% else %}<span class="muted">assembled on approved plan item</span>{% endif %}</td>
+      <td class="muted" style="white-space:nowrap">{{ it.created_at }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" style="border-bottom:0">
+      <div class="empty">
+        <div class="e-icon">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+        </div>
+        No artifacts yet. Run a cycle, then approve an <code>assemble_*</code> plan item — the artifact lands here for review.
+      </div>
+    </td></tr>
+    {% endfor %}
+  </table>
+  <p class="muted" style="margin-bottom:0;font-size:13px">To produce an artifact: approve an <code>assemble_digest</code> /
+  <code>assemble_newsletter</code> / <code>assemble_social_post</code> item on a plan. The digest <code>send_digest_email</code>
+  is the only send — human-approval-gated, dry-run by default.</p>
+</div>
+{% endblock %}

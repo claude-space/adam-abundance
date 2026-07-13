@@ -1,0 +1,190 @@
+{% extends "base.html" %}
+{% block title %}Memory — Switchboard{% endblock %}
+{% block body %}
+
+<div class="phero rise" style="--ph:#26c6a6">
+  <h2>
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg>
+    </span>
+    Shared memory
+  </h2>
+  <div class="ph-sub">Typed, provenance-tagged, TTL-scoped entries shared across the agent fleet.</div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+      <b>{{ summary.total }}</b> active entries
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      <b>{{ summary.facts }}</b> verified facts
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <b>{{ summary.claims }}</b> unverified claims
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+      <b>{{ entries|length }}</b> matching filters
+    </span>
+  </div>
+</div>
+
+<div class="grid rise-2" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin-bottom:16px">
+
+  <div class="panel" style="margin:0">
+    <h3>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>
+      Composition
+      <span class="hint muted">by entry type</span>
+    </h3>
+    {% if summary.total and summary.by_type %}
+      {% set ns = namespace(acc=0.0, stops=[]) %}
+      {% for t, c in summary.by_type|dictsort(by='value', reverse=true) %}
+        {% set start = ns.acc %}
+        {% set ns.acc = ns.acc + (360.0 * c / summary.total) %}
+        {% set ns.stops = ns.stops + [type_color(t) ~ ' ' ~ start|round(2) ~ 'deg ' ~ ns.acc|round(2) ~ 'deg'] %}
+      {% endfor %}
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+        <div class="donut" style="background:conic-gradient({{ ns.stops|join(', ') }}, var(--surface-3) {{ ns.acc|round(2) }}deg 360deg)">
+          <div class="d-inner"><div>
+            <div class="d-val">{{ summary.total }}</div>
+            <div class="d-lbl">entries</div>
+          </div></div>
+        </div>
+        <div class="legend" style="flex:1">
+          {% for t, c in summary.by_type|dictsort(by='value', reverse=true) %}
+          <div class="l-row">
+            <span class="adot" style="background:{{ type_color(t) }}"></span>{{ t }}
+            <span class="muted" style="margin-left:auto;font-variant-numeric:tabular-nums">{{ (100.0 * c / summary.total)|round(1) }}%</span>
+            <b style="margin-left:12px">{{ c }}</b>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% else %}
+      <div class="empty"><div class="e-icon">◔</div>No entries in memory yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="panel" style="margin:0">
+    <h3>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/><polyline points="9 12 11 14 15 10"/></svg>
+      Verification
+      <span class="hint muted">facts vs claims</span>
+    </h3>
+    {% if summary.total %}
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+        <div class="gauge-wrap">
+          <div class="gauge" style="--pct:{{ (100.0 * summary.verified / summary.total)|round(1) }};--gc:var(--good)">
+            <div class="g-inner"><div>
+              <div class="g-val">{{ summary.verified }}</div>
+              <div class="g-pct">{{ (100.0 * summary.verified / summary.total)|round(1) }}%</div>
+            </div></div>
+          </div>
+          <div class="g-label">verified</div>
+          <div class="g-cap">of all active entries</div>
+        </div>
+        <div style="flex:1;min-width:200px">
+          <div class="mini-kpis" style="margin-bottom:14px">
+            <div><div class="v">{{ summary.facts }}</div><div class="l">Facts</div></div>
+            <div><div class="v">{{ summary.claims }}</div><div class="l">Claims</div></div>
+            <div><div class="v">{{ summary.verified }}</div><div class="l">Verified</div></div>
+          </div>
+          {% set fc = summary.facts + summary.claims %}
+          {% if fc %}
+          <div class="ratio">
+            <span style="width:{{ (100.0 * summary.facts / fc)|round(1) }}%;background:var(--good)"></span>
+            <span style="width:{{ (100.0 * summary.claims / fc)|round(1) }}%;background:var(--warn)"></span>
+          </div>
+          <div style="display:flex;gap:16px;margin-top:8px;font-size:12px;color:var(--ink-2)">
+            <span><span class="adot" style="background:var(--good)"></span>facts <b style="color:var(--ink);font-variant-numeric:tabular-nums">{{ summary.facts }}</b></span>
+            <span><span class="adot" style="background:var(--warn)"></span>claims <b style="color:var(--ink);font-variant-numeric:tabular-nums">{{ summary.claims }}</b></span>
+          </div>
+          {% else %}
+          <div class="muted" style="font-size:12.5px">No fact or claim entries yet — knowledge lands here once agents observe.</div>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      <div class="empty"><div class="e-icon">◇</div>Nothing to verify yet.</div>
+    {% endif %}
+  </div>
+
+</div>
+
+<div class="panel rise-3">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+    Filter
+    <span class="hint muted">narrow the working set</span>
+  </h3>
+  <form method="get" action="/memory" class="toolbar">
+    <label>Brand<br>
+      <select name="brand"><option value="">any</option>
+        {% for b in brands %}<option value="{{ b }}" {{ 'selected' if f.brand==b }}>{{ b }}</option>{% endfor %}
+        <option value="portfolio" {{ 'selected' if f.brand=='portfolio' }}>portfolio</option>
+      </select></label>
+    <label>Type<br>
+      <select name="type"><option value="">any</option>
+        {% for t in types %}<option value="{{ t }}" {{ 'selected' if f.type==t }}>{{ t }}</option>{% endfor %}
+      </select></label>
+    <label>Verified<br>
+      <select name="verified"><option value="">any</option>
+        <option value="true" {{ 'selected' if f.verified=='true' }}>verified only</option>
+        <option value="false" {{ 'selected' if f.verified=='false' }}>claims only</option>
+      </select></label>
+    <label>Agent<br>
+      <select name="source_agent"><option value="">any</option>
+        {% for a in agents %}<option value="{{ a }}" {{ 'selected' if f.source_agent==a }}>{{ a }}</option>{% endfor %}
+      </select></label>
+    <button type="submit">Filter</button>
+    <a href="/memory" class="muted" style="align-self:center">reset</a>
+    <a href="/api/memory?format=csv&limit=500{% if f.brand %}&brand={{ f.brand }}{% endif %}{% if f.type %}&type={{ f.type }}{% endif %}"
+       class="muted" style="align-self:center">export CSV</a>
+  </form>
+</div>
+
+<div class="panel rise-4">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+    Entries
+    <span class="hint muted">{{ entries|length }} shown · newest first · provenance = agent → system</span>
+  </h3>
+  <div style="overflow-x:auto">
+    <table>
+      <tr><th>ID</th><th>Type</th><th>Brand</th><th>Kind</th><th>Provenance</th><th>Verified</th>
+          <th class="num">Conf.</th><th>Status</th><th>When</th><th>Payload</th></tr>
+      {% for e in entries %}
+      <tr>
+        <td><a href="/memory/{{ e.id }}" style="font-variant-numeric:tabular-nums">{{ e.id }}</a></td>
+        <td><span class="badge" style="color:{{ type_color(e.type) }};border-color:color-mix(in srgb,{{ type_color(e.type) }} 45%,transparent);background:color-mix(in srgb,{{ type_color(e.type) }} 10%,transparent)">{{ e.type }}</span></td>
+        <td>{{ e.brand }}</td>
+        <td>{{ e.kind }}</td>
+        <td><span class="adot" style="background:{{ agent_color(e.source_agent) }}"></span>{{ e.source_agent }}{% if e.source_system %} <span class="muted">→ {{ e.source_system }}</span>{% endif %}
+            {% if e.source_urls %}<br>{% for u in e.source_urls %}<a href="{{ u }}" target="_blank" rel="noopener">src</a> {% endfor %}{% endif %}</td>
+        <td>{% if e.verified %}<span class="badge ok">fact</span>{% elif e.type in ['fact','claim'] %}<span class="badge dry">claim</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+        <td class="num">
+          {% if e.confidence is not none %}
+            <span class="muted" style="font-variant-numeric:tabular-nums">{{ '%.2f'|format(e.confidence) }}</span>
+            <div class="bar" style="width:52px;height:5px;margin-top:5px"><span style="width:{{ [(e.confidence * 100)|round(0), 100]|min }}%;background:{% if e.confidence >= 0.75 %}var(--good){% elif e.confidence >= 0.45 %}var(--warn){% else %}var(--bad){% endif %}"></span></div>
+          {% endif %}
+        </td>
+        <td class="status-{{ e.status }}">{{ e.status }}</td>
+        <td class="muted" style="font-size:12px;white-space:nowrap">{{ e.created_at }}</td>
+        <td><details><summary class="muted">view</summary><pre style="max-width:420px;max-height:260px;overflow:auto">{{ e.payload|tojson(indent=2) }}</pre></details></td>
+      </tr>
+      {% else %}
+      <tr><td colspan="10">
+        <div class="empty">
+          <div class="e-icon">◑</div>
+          No entries match these filters.<br>
+          <span style="font-size:12.5px">Run a cycle or seed some data — or <a href="/memory">reset the filters</a>.</span>
+        </div>
+      </td></tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+
+{% endblock %}

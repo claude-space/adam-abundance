@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# SECRETS — never commit. switchboard.env holds LIVE production credentials.
+# ---------------------------------------------------------------------------
+switchboard.env
+*.env
+.env
+.env.*
+!.env.example
+!.env.prod.example
+*.key
+*-service-account*.json
+service-account*.json
+.emaki-state.json
+*.pem
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local artifacts / blob-store fallback
+artifacts/
+local_artifacts/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

@@ -1,0 +1,198 @@
+{% extends "base.html" %}
+{% block title %}Observability — Switchboard{% endblock %}
+{% block body %}
+{% set metric_names = {'ahrefs_units':'Ahrefs API','llm_micros':'LLM spend','bq_bytes':'BigQuery scan'} %}
+{% macro fmt(metric, v) %}{%- if metric == 'llm_micros' -%}${{ ((v or 0)/1000000)|round(2) }}{%- elif metric == 'bq_bytes' -%}{{ ((v or 0)/1048576)|round(1) }} MB{%- else -%}{{ v or 0 }} u{%- endif -%}{% endmacro %}
+
+<!-- ============ hero ============ -->
+<div class="phero rise" style="--ph:#3fb950">
+  <h2>
+    <span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+    Observability
+  </h2>
+  <div class="ph-sub">The ops room — spend against daily caps, agent throughput, memory state and the full audit trail.</div>
+  <div class="ph-stats">
+    <span class="pillx"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg> <b>{{ totals.calls }}</b> tool calls</span>
+    <span class="pillx"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.1V12a10 10 0 1 1-5.9-9.1"/><polyline points="22 4 12 14 9 11"/></svg> <b>{{ totals.ok_rate }}%</b> success</span>
+    <span class="pillx"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5.5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg> <b>${{ totals.llm_usd }}</b> LLM</span>
+    <span class="pillx"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg> <b>{{ totals.bq_mb }}</b> MB BQ</span>
+    {% if spend.kill_switch %}
+    <span class="pillx" style="border-color:color-mix(in srgb,var(--bad) 55%,transparent)"><span class="adot" style="background:var(--bad);margin-right:0"></span> kill switch <b style="color:var(--bad)">ENGAGED</b></span>
+    {% else %}
+    <span class="pillx"><span class="pulse"></span> kill switch <b>off</b></span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ============ KPI tiles ============ -->
+<div class="grid rise-2" style="grid-template-columns:repeat(auto-fit,minmax(170px,1fr));margin-bottom:16px">
+  <div class="card kpi tile" style="--c:#5b9dff">
+    <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span><span class="label">Tool calls</span></div>
+    <div class="num">{{ totals.calls }}</div>
+    <div class="foot">across all agents</div>
+  </div>
+  <div class="card kpi tile" style="--c:#7c5cff">
+    <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></span><span class="label">Actions</span></div>
+    <div class="num">{{ totals.acts }}</div>
+    <div class="foot">acts emitted</div>
+  </div>
+  <div class="card kpi tile" style="--c:#3fb950">
+    <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.1V12a10 10 0 1 1-5.9-9.1"/><polyline points="22 4 12 14 9 11"/></svg></span><span class="label">Success rate</span></div>
+    <div class="num">{{ totals.ok_rate }}<span style="font-size:18px;color:var(--muted)">%</span></div>
+    <div class="foot">calls returning OK</div>
+  </div>
+  <div class="card kpi tile" style="--c:#d6a021">
+    <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="2" x2="12" y2="22"/><path d="M17 5.5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></span><span class="label">LLM spend</span></div>
+    <div class="num sm">${{ totals.llm_usd }}</div>
+    <div class="foot">USD, all time shown</div>
+  </div>
+  <div class="card kpi tile" style="--c:#5b9dff">
+    <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg></span><span class="label">BQ scanned</span></div>
+    <div class="num sm">{{ totals.bq_mb }}<span style="font-size:14px;color:var(--muted)"> MB</span></div>
+    <div class="foot">BigQuery bytes billed</div>
+  </div>
+</div>
+
+<!-- ============ spend vs caps: radial gauges ============ -->
+<div class="panel rise-2">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+    Spend vs caps <span class="hint muted">resets daily at midnight UTC</span>
+  </h3>
+  <div class="gauges" style="padding:8px 0 4px">
+    {% for metric, s in spend.items() if metric != 'kill_switch' %}
+    {% set p = s.pct or 0 %}
+    {% set gc = 'var(--bad)' if p >= 100 else ('var(--warn)' if p >= 75 else 'var(--good)') %}
+    <div class="gauge-wrap">
+      <div class="gauge" style="--pct:{{ [p, 100]|min }};--gc:{{ gc }}">
+        <div class="g-inner"><div>
+          <div class="g-val">{{ fmt(metric, s.spent_today) }}</div>
+          <div class="g-pct">{% if s.pct is not none %}{{ s.pct }}% used{% else %}no cap{% endif %}</div>
+        </div></div>
+      </div>
+      <div class="g-label">{{ metric_names.get(metric, metric) }}</div>
+      <div class="g-cap">{% if s.cap_per_day %}cap {{ fmt(metric, s.cap_per_day) }} · {{ fmt(metric, s.remaining) }} left{% else %}no daily cap set{% endif %}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line);display:flex;align-items:center;gap:10px;font-size:13px">
+    {% if spend.kill_switch %}
+    <span class="badge live">kill switch ENGAGED</span>
+    <span class="muted">dispatch &amp; live actions halted — observe still runs</span>
+    {% else %}
+    <span class="pulse"></span>
+    <span class="muted">Kill switch <b style="color:var(--ink)">off</b> — spend accrues normally against caps.</span>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ============ spend small multiples ============ -->
+<div class="grid rise-3" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+  {% for c in charts %}
+  {% set ccolor = ['var(--accent)','var(--accent-2)','var(--good)'][loop.index0 % 3] %}
+  <div class="card">
+    <h4>{{ c.title }}</h4>
+    {% if c.empty %}
+    <div class="empty" style="padding:26px 12px">
+      <div class="e-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></div>
+      no spend recorded yet
+    </div>
+    {% else %}
+    <div style="display:flex;align-items:baseline;gap:8px;margin:2px 0 10px">
+      <span style="font-size:21px;font-weight:750;letter-spacing:-.02em;font-variant-numeric:tabular-nums">{{ c.latest }}</span>
+      <span class="muted" style="font-size:11px;text-transform:uppercase;letter-spacing:.05em">latest day</span>
+    </div>
+    <svg viewBox="0 0 {{ c.width }} {{ c.height }}" width="100%" style="max-width:{{ c.width*2 }}px" role="img" aria-label="{{ c.title }} by day">
+      <line x1="0" y1="{{ c.baseline }}" x2="{{ c.width }}" y2="{{ c.baseline }}" stroke="var(--line-2)" stroke-width="1"/>
+      {% for b in c.bars %}
+      <rect x="{{ b.x }}" y="{{ b.y }}" width="{{ b.w }}" height="{{ b.h }}" rx="3" fill="{{ ccolor }}" opacity="{{ '1' if loop.last else '0.55' }}">
+        <title>{{ b.date }}: {{ b.val }}</title></rect>
+      <text x="{{ b.x + b.w/2 }}" y="{{ c.height - 4 }}" text-anchor="middle" font-size="8" fill="var(--muted)">{{ b.date }}</text>
+      {% endfor %}
+    </svg>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+<!-- ============ agents + memory ============ -->
+<div class="grid rise-4" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr))">
+  <div class="panel" style="margin:16px 0 0">
+    <h3>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/></svg>
+      Agent activity <span class="hint muted">calls · ok · actions</span>
+    </h3>
+    {% if agents %}
+    {% set maxc = (agents | map(attribute='calls') | list + [1]) | max %}
+    <div class="fleet-list">
+      {% for a in agents %}
+      <div class="fleet-row">
+        <span class="fr-name"><span class="adot" style="background:{{ agent_color(a.agent) }}"></span>{{ a.agent }}</span>
+        <span class="fr-track"><span class="fr-fill" style="width:{{ (100 * a.calls / maxc)|round(1) }}%;background:{{ agent_color(a.agent) }}"></span></span>
+        <span class="fr-num" style="width:118px">{{ a.calls }}{% if a.calls %} · {{ (100*a.ok/a.calls)|round(0)|int }}% ok{% endif %} · {{ a.acts }} act</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="e-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/></svg></div>
+      No activity yet — agent calls will land here as they run.
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="panel" style="margin:16px 0 0">
+    <h3>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg>
+      Active memory by type
+      <span class="hint"><a href="/api/memory?format=csv&limit=500">Export CSV →</a></span>
+    </h3>
+    {% if mem_counts %}
+    <div class="mini-kpis" style="margin-bottom:16px">
+      <div><div class="v">{{ mem_counts.values()|sum }}</div><div class="l">active entries</div></div>
+      <div><div class="v">{{ mem_counts|length }}</div><div class="l">entry types</div></div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">
+      {% for t, n in mem_counts.items() %}
+      <a href="/memory?type={{ t }}" style="text-decoration:none"><span class="chip act" style="--c:{{ type_color(t) }};padding:5px 11px;font-size:12px"><span class="adot" style="background:{{ type_color(t) }};width:7px;height:7px;margin-right:6px"></span>{{ t }} <b style="font-variant-numeric:tabular-nums">{{ n }}</b></span></a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="e-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg></div>
+      Memory is empty — entries appear as agents observe and learn.
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- ============ audit trail ============ -->
+<div class="panel rise-4">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    Recent tool calls <span class="hint muted">{{ audit|length }} most recent · full audit trail</span>
+  </h3>
+  {% if audit %}
+  <table>
+    <tr><th>When</th><th>Agent</th><th>Tool</th><th>Action</th><th>Brand</th><th>Mode</th><th>OK</th><th>Cost</th></tr>
+    {% for c in audit %}
+    <tr>
+      <td class="muted num" style="white-space:nowrap">{{ c.created_at[:19]|replace('T',' ') }}</td>
+      <td style="white-space:nowrap"><span class="adot" style="background:{{ agent_color(c.agent) }}"></span>{{ c.agent }}</td>
+      <td><code>{{ c.tool }}</code></td>
+      <td>{{ c.action }}</td>
+      <td>{% if c.brand %}{{ c.brand }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      <td>{% if c.dry_run %}<span class="badge dry">dry</span>{% else %}<span class="badge live">live</span>{% endif %}</td>
+      <td>{% if c.ok %}<span style="color:var(--good);font-weight:700">✓</span>{% elif c.ok is none %}<span class="muted">—</span>{% else %}<span style="color:var(--bad);font-weight:700">✗</span>{% endif %}</td>
+      <td class="muted num" style="font-size:12px;white-space:nowrap">{% if c.cost %}{% if c.cost.bq_bytes %}{{ (c.cost.bq_bytes/1048576)|round(1) }}MB {% endif %}{% if c.cost.llm_micros %}${{ (c.cost.llm_micros/1e6)|round(4) }} {% endif %}{% if c.cost.ahrefs_units %}{{ c.cost.ahrefs_units }}u{% endif %}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <div class="empty">
+    <div class="e-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+    No tool calls yet — the audit trail fills in as agents work.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

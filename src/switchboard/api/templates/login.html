@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in — Switchboard</title>
+  <style>
+    :root { --accent:#5b9dff; --accent-2:#7c5cff; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; display:grid; place-items:center;
+           font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+           color:#eceef1; background:radial-gradient(900px 500px at 50% -5%, #1a2130 0%, #0a0c10 60%); }
+    .box { width:400px; max-width:92vw; text-align:center; padding:8px; }
+    .mark { width:56px; height:56px; margin:0 auto 18px; display:grid; place-items:center; border-radius:15px;
+            background:linear-gradient(135deg,var(--accent),var(--accent-2)); color:#05132b; font-size:30px;
+            box-shadow:0 10px 40px rgba(91,157,255,.28); }
+    h1 { margin:0 0 6px; font-size:24px; letter-spacing:-0.02em; }
+    p.tag { color:#8b93a1; margin:0 0 26px; }
+    .panel { background:#12151c; border:1px solid #242a35; border-radius:16px; padding:26px 24px;
+             box-shadow:0 1px 2px rgba(0,0,0,.4), 0 14px 40px rgba(0,0,0,.3); }
+    button { background:var(--accent); color:#05132e; border:0; padding:11px 18px; border-radius:10px;
+             font-weight:650; cursor:pointer; font-size:14px; width:100%; }
+    button:hover { filter:brightness(1.08); }
+    .note { color:#6f7887; font-size:12px; margin-top:14px; }
+    .brands { display:flex; align-items:center; justify-content:center; gap:22px; margin-top:30px; opacity:.8; }
+    .brands img { height:26px; width:auto; object-fit:contain; filter:grayscale(.2); }
+    a { color:var(--accent); text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="mark">◑</div>
+    <h1>Switchboard</h1>
+    <p class="tag">Orchestration &amp; shared memory for the Auto portfolio</p>
+    <div class="panel">
+      <p style="margin-top:0">Sign in with your Valnet Google account.</p>
+      <a href="/auth/login"><button>Sign in with Google</button></a>
+      {% if env == "local" %}<div class="note">Local environment — OAuth optional, dev login available.</div>{% endif %}
+    </div>
+    <div class="brands">
+      <img src="/static/brand-logos/hotcars.avif" alt="HotCars" onerror="this.style.display='none'"/>
+      <img src="/static/brand-logos/carbuzz.avif" alt="CarBuzz" onerror="this.style.display='none'"/>
+      <img src="/static/brand-logos/topspeed.avif" alt="TopSpeed" onerror="this.style.display='none'"/>
+    </div>
+  </div>
+</body>
+</html>

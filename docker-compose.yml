@@ -1,0 +1,24 @@
+# Local Postgres for Switchboard's shared memory (PRD §7 mandates Postgres, not
+# SQLite, for concurrent agent reads/writes). This is for local development only.
+services:
+  postgres:
+    image: postgres:16
+    container_name: switchboard-postgres
+    environment:
+      POSTGRES_USER: switchboard
+      POSTGRES_PASSWORD: switchboard
+      POSTGRES_DB: switchboard
+    # Host 5544 → container 5432 (host 5432 is taken by a native PostgreSQL
+    # install on this machine). Point DATABASE_URL at :5544 to use this.
+    ports:
+      - "5544:5432"
+    volumes:
+      - switchboard_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U switchboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  switchboard_pgdata:

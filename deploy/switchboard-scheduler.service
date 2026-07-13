@@ -1,0 +1,18 @@
+# /etc/systemd/system/switchboard-scheduler.service
+# The morning cycle + scheduled feeders (APScheduler, America/New_York).
+[Unit]
+Description=Switchboard scheduler (morning cycle + feeders)
+After=network-online.target switchboard-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robert
+WorkingDirectory=/home/robert/switchboard
+EnvironmentFile=/home/robert/switchboard/switchboard.env
+ExecStart=/home/robert/switchboard/.venv/bin/switchboard schedule
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

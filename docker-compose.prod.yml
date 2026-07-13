@@ -1,0 +1,36 @@
+# Production compose for the ShellAgent VM. Two services off one image:
+#   web       — the FastAPI approval/observability console
+#   scheduler — the morning cycle + feeders (APScheduler)
+# The DB is EXTERNAL (Supabase, or a separate local Postgres) via DATABASE_URL.
+#
+# network_mode: host so the containers reach the sibling Auto services on the
+# VM's localhost (Albert :3100, Seona :3110, HC-Viral :8001, ...). Linux only.
+# On non-Linux hosts, drop network_mode and use host.docker.internal in the URLs.
+services:
+  web:
+    build: .
+    image: switchboard:latest
+    command: ["switchboard", "serve"]
+    env_file: [switchboard.env]
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - switchboard_artifacts:/var/lib/switchboard/artifacts
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  scheduler:
+    image: switchboard:latest
+    command: ["switchboard", "schedule"]
+    env_file: [switchboard.env]
+    network_mode: host
+    restart: unless-stopped
+    depends_on: [web]
+    volumes:
+      - switchboard_artifacts:/var/lib/switchboard/artifacts
+
+volumes:
+  switchboard_artifacts:

@@ -1,0 +1,206 @@
+{% extends "base.html" %}
+{% block title %}Plan #{{ plan.id }} — Switchboard{% endblock %}
+{% block body %}
+{% set total_items = plan['items']|length %}
+{% set live_items = plan['items']|rejectattr('dry_run')|list|length %}
+{% set sc = {'proposed':'#6f7887','approved':'#5b9dff','rejected':'#f4574d','done':'#3fb950','failed':'#f4574d','dispatched':'#d6a021','draft':'#a8b1be'} %}
+{% set pb = {'draft':'muted','proposed':'muted','approved':'accent','dispatched':'dry','done':'ok','failed':'live','rejected':'live'} %}
+
+<p class="rise" style="margin:0 0 12px"><a href="/" class="muted">&larr; All plans</a></p>
+
+<div class="phero rise" style="--ph:#5b9dff">
+  <h2>
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4a3 3 0 0 1 6 0"/><polyline points="9 13.5 11.3 15.8 15.5 10.8"/></svg>
+    </span>
+    Plan #{{ plan.id }} &mdash; {{ plan.brand }}
+    <span class="badge {{ pb.get(plan.status, 'muted') }}" style="font-size:12px;font-weight:500">{{ plan.status }}</span>
+  </h2>
+  <div class="ph-sub">{{ plan.plan_date }} &middot; created by {{ plan.created_by }}{% if plan.approved_by %} &middot; approved by {{ plan.approved_by }} at {{ plan.approved_at }}{% endif %}</div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+      <b>{{ total_items }}</b> item{{ '' if total_items == 1 else 's' }}
+    </span>
+    {% for k, v in plan.status_counts.items() %}
+    <span class="pillx"><span class="adot" style="background:{{ sc.get(k, '#6f7887') }};margin-right:0"></span> <b>{{ v }}</b> {{ k }}</span>
+    {% endfor %}
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <b>{{ live_items }}</b> live
+    </span>
+    <span class="pillx">est. <b>${{ '%.2f'|format(plan.cost_totals.llm_micros/1e6) }}</b> LLM if live</span>
+  </div>
+</div>
+
+<div class="grid rise rise-2" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));margin-bottom:16px">
+  <div class="card kpi tile" style="--c:#3fb950">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M21 12v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h11"/></svg></span>
+      <span class="label">Items to decide</span>
+    </div>
+    <div class="num sm">{{ total_items }}</div>
+    <div class="foot">{% for k, v in plan.status_counts.items() %}{{ v }} {{ k }}{% if not loop.last %} &middot; {% endif %}{% endfor %}</div>
+  </div>
+  <div class="card kpi tile" style="--c:#7c5cff">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></span>
+      <span class="label">Est. LLM</span>
+    </div>
+    <div class="num sm">${{ '%.2f'|format(plan.cost_totals.llm_micros/1e6) }}</div>
+    <div class="foot">if run live</div>
+  </div>
+  <div class="card kpi tile" style="--c:#5b9dff">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></span>
+      <span class="label">Est. BigQuery</span>
+    </div>
+    <div class="num sm">{{ (plan.cost_totals.bq_bytes/1048576)|round(0)|int }} MB</div>
+    <div class="foot">scanned at dispatch</div>
+  </div>
+  <div class="card kpi tile" style="--c:#d6a021">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+      <span class="label">Est. Ahrefs</span>
+    </div>
+    <div class="num sm">{{ plan.cost_totals.ahrefs_units }} u</div>
+    <div class="foot">API units</div>
+  </div>
+</div>
+
+<div class="grid rise rise-3" style="grid-template-columns:1.6fr 1fr;align-items:stretch">
+  <div class="panel" style="margin:0">
+    <h3>Decisions
+      <span class="hint muted">{% if can_approve %}you can approve for {{ plan.brand }}{% else %}read-only{% endif %}</span>
+    </h3>
+    <p class="muted" style="margin-top:0">Created by {{ plan.created_by }}{% if plan.approved_by %} &middot; approved by {{ plan.approved_by }} at {{ plan.approved_at }}{% endif %}</p>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      {% if can_approve %}
+        {% if plan.status == 'draft' %}
+          <form class="inline" method="post" action="/plans/{{ plan.id }}/approve">
+            <button type="submit">Approve plan</button></form>
+          <form class="inline" method="post" action="/plans/{{ plan.id }}/approve-all">
+            <button type="submit"
+              onclick="return confirm('Approve the plan and every proposed item as dry-run?')">Approve all (dry-run)</button></form>
+        {% endif %}
+        {% if plan.status in ['approved','dispatched'] %}
+          <form class="inline" method="post" action="/plans/{{ plan.id }}/dispatch">
+            <button type="submit">Dispatch approved items</button></form>
+        {% endif %}
+        {% if plan.status not in ['draft','approved','dispatched'] %}
+          <span class="muted">No plan-level actions for a {{ plan.status }} plan &mdash; decide remaining items below.</span>
+        {% endif %}
+      {% else %}
+        <span class="muted">Read-only for this brand &mdash; approving requires an approver role (&sect;9.1).</span>
+      {% endif %}
+    </div>
+    <p class="muted" style="margin:16px 0 0;font-size:12px;display:flex;align-items:center;gap:7px">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/></svg>
+      Dry-run is the default. A live approval is required for any real external side effect, and the governor still budget-checks it at dispatch.
+    </p>
+  </div>
+
+  <div class="panel" style="margin:0">
+    <h3>Status mix</h3>
+    {% if total_items > 0 %}
+    {% set ns = namespace(deg=0.0) %}
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap">
+      <div class="donut" style="background:conic-gradient({% for k, v in plan.status_counts.items() %}{{ sc.get(k, '#6f7887') }} {{ ns.deg|round(1) }}deg {{ (ns.deg + v/total_items*360)|round(1) }}deg{% set ns.deg = ns.deg + v/total_items*360 %}{% if not loop.last %}, {% endif %}{% endfor %}, var(--surface-3) {{ ns.deg|round(1) }}deg 360deg)">
+        <div class="d-inner"><div><div class="d-val">{{ total_items }}</div><div class="d-lbl">items</div></div></div>
+      </div>
+      <div class="legend">
+        {% for k, v in plan.status_counts.items() %}
+        <div class="l-row"><span class="adot" style="background:{{ sc.get(k, '#6f7887') }}"></span> {{ k }} <b>{{ v }}</b></div>
+        {% endfor %}
+        <div class="l-row" style="border-top:1px solid var(--line);padding-top:6px;margin-top:2px">
+          <span class="adot" style="background:var(--bad)"></span> live mode <b>{{ live_items }}</b>
+        </div>
+      </div>
+    </div>
+    {% else %}
+    <div class="empty"><div class="e-icon">&#9680;</div>No items in this plan yet.</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="panel rise rise-4">
+  <h3>Plan items
+    <span class="hint muted">{{ total_items }} item{{ '' if total_items == 1 else 's' }} &middot; ranked by expected impact</span>
+  </h3>
+  {% if total_items > 0 %}
+  <div style="overflow-x:auto">
+  <table>
+    <tr><th class="num">#</th><th>Action</th><th>Agent</th><th>Rationale</th><th>Cost est.</th><th>Mode</th><th>Status</th><th>Decide</th></tr>
+    {% for it in plan['items'] %}
+    <tr>
+      <td class="num muted">{{ it.rank }}</td>
+      <td><code>{{ it.action_type }}</code>
+          {% if it.params %}<details><summary class="muted">params</summary><pre>{{ it.params|tojson(indent=2) }}</pre></details>{% endif %}</td>
+      <td style="white-space:nowrap"><span class="adot" style="background:{{ agent_color(it.assigned_agent) }}"></span>{{ it.assigned_agent }}</td>
+      <td style="max-width:260px">{% if it.rationale %}{{ it.rationale }}{% else %}<span class="muted">&mdash;</span>{% endif %}</td>
+      <td>
+        {% if it.cost_estimate %}
+          <div style="display:flex;flex-wrap:wrap;gap:4px;max-width:170px">
+          {% for k, v in it.cost_estimate.items() %}
+            {% if k == 'llm_micros' %}<span class="chip act" style="--c:#7c5cff">LLM ${{ '%.2f'|format(v/1e6) }}</span>
+            {% elif k == 'bq_bytes' %}<span class="chip act" style="--c:#5b9dff">BQ {{ (v/1048576)|round(1) }} MB</span>
+            {% elif k == 'ahrefs_units' %}<span class="chip act" style="--c:#d6a021">Ahrefs {{ v }} u</span>
+            {% else %}<span class="chip">{{ k }} {{ v }}</span>{% endif %}
+          {% endfor %}
+          </div>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
+      <td>{% if it.dry_run %}<span class="badge dry">dry-run</span>{% else %}<span class="badge live">LIVE</span>{% endif %}</td>
+      <td style="white-space:nowrap">
+        <span class="lifecycle" title="proposed &rarr; approved &rarr; dispatched &rarr; done">
+          {% if it.status == 'done' %}
+            <span class="lc-step done"></span><span class="lc-step done"></span><span class="lc-step done"></span><span class="lc-step done"></span>
+          {% elif it.status in ['failed','rejected'] %}
+            <span class="lc-step fail"></span><span class="lc-step fail"></span><span class="lc-step fail"></span><span class="lc-step fail"></span>
+          {% elif it.status == 'dispatched' %}
+            <span class="lc-step done"></span><span class="lc-step done"></span><span class="lc-step on"></span><span class="lc-step"></span>
+          {% elif it.status == 'approved' %}
+            <span class="lc-step done"></span><span class="lc-step on"></span><span class="lc-step"></span><span class="lc-step"></span>
+          {% else %}
+            <span class="lc-step on"></span><span class="lc-step"></span><span class="lc-step"></span><span class="lc-step"></span>
+          {% endif %}
+        </span>
+        <div class="status-{{ it.status }}" style="font-size:12.5px;margin-top:4px">{{ it.status }}</div>
+        {% if it.result_ref and it.result_ref.refused %}<div class="muted" style="font-size:12px">{{ it.result_ref.refused }}</div>{% endif %}
+      </td>
+      <td>
+        {% if it.status == 'proposed' and can_approve %}
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-start">
+          <form class="inline" method="post" action="/items/{{ it.id }}/approve">
+            <input type="hidden" name="plan_id" value="{{ plan.id }}"/>
+            <button class="ghost" type="submit">Approve (dry-run)</button></form>
+          <form class="inline" method="post" action="/items/{{ it.id }}/approve">
+            <input type="hidden" name="plan_id" value="{{ plan.id }}"/>
+            <input type="hidden" name="go_live" value="1"/>
+            <button class="danger" type="submit"
+              onclick="return confirm('Approve for a LIVE action? This performs a real side effect.')">Approve LIVE</button></form>
+          <form class="inline" method="post" action="/items/{{ it.id }}/reject">
+            <input type="hidden" name="plan_id" value="{{ plan.id }}"/>
+            <button class="ghost" type="submit">Reject</button></form>
+          <details style="margin-top:2px">
+            <summary class="muted">edit</summary>
+            <form method="post" action="/items/{{ it.id }}/edit" style="margin-top:4px;min-width:220px">
+              <input type="hidden" name="plan_id" value="{{ plan.id }}"/>
+              <div><input name="rationale" value="{{ it.rationale or '' }}" style="width:100%" placeholder="rationale"/></div>
+              <div style="margin-top:4px"><textarea name="params_json" rows="3" style="width:100%;font-family:monospace"
+                    placeholder="params JSON (blank = unchanged)">{{ it.params|tojson }}</textarea></div>
+              <button class="ghost" type="submit" style="margin-top:4px">Save edits</button>
+            </form>
+          </details>
+          </div>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% else %}
+  <div class="empty"><div class="e-icon">&#9680;</div>This plan has no items &mdash; nothing to decide.</div>
+  {% endif %}
+</div>
+{% endblock %}

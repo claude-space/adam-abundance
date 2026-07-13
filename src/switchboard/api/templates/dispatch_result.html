@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}Dispatch — plan #{{ summary.plan_id }} — Switchboard{% endblock %}
+{% block body %}
+<style>.status-refused{color:var(--muted)}</style>
+{% set clean = summary.failed == 0 and summary.refused == 0 %}
+{% set hero = '#3fb950' if clean else '#d6a021' %}
+{% set total = summary.done + summary.dispatched + summary.failed + summary.refused %}
+
+<p class="rise" style="margin:0 0 12px;font-size:13px">
+  <a href="/plans/{{ plan_id }}">&larr; Back to plan #{{ plan_id }}</a>
+</p>
+
+<div class="phero rise" style="--ph:{{ hero }}">
+  <h2>
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+    </span>
+    Dispatch — plan #{{ summary.plan_id }}
+  </h2>
+  <div class="ph-sub">
+    {% if clean %}Dispatch receipt — every action landed clean, with zero failures and zero refusals.{% else %}Dispatch receipt — some actions need attention; review the failed and refused rows below.{% endif %}
+  </div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+      <b>{{ summary['items']|length }}</b> items
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+      <b>{{ summary.done }}</b> done
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      <b>{{ summary.dispatched }}</b> dispatched
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      <b>{{ summary.failed }}</b> failed
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+      <b>{{ summary.refused }}</b> refused
+    </span>
+  </div>
+</div>
+
+<div class="grid rise-2" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr))">
+  <div class="card kpi tile" style="--c:#3fb950">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg></span>
+      <span class="label">Done</span>
+    </div>
+    <div class="num">{{ summary.done }}</div>
+    <div class="foot">executed end-to-end</div>
+  </div>
+  <div class="card kpi tile" style="--c:#5b9dff">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></span>
+      <span class="label">Dispatched</span>
+    </div>
+    <div class="num">{{ summary.dispatched }}</div>
+    <div class="foot">handed off downstream</div>
+  </div>
+  <div class="card kpi tile" style="--c:#f4574d">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>
+      <span class="label">Failed</span>
+    </div>
+    <div class="num">{{ summary.failed }}</div>
+    <div class="foot">errored during execution</div>
+  </div>
+  <div class="card kpi tile" style="--c:#6f7887">
+    <div class="k-top">
+      <span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></span>
+      <span class="label">Refused</span>
+    </div>
+    <div class="num">{{ summary.refused }}</div>
+    <div class="foot">declined by guardrails</div>
+  </div>
+</div>
+
+{% if total > 0 %}
+{% set deg_done = (summary.done / total * 360)|round(2) %}
+{% set deg_disp = deg_done + (summary.dispatched / total * 360)|round(2) %}
+{% set deg_fail = deg_disp + (summary.failed / total * 360)|round(2) %}
+<div class="panel rise-3">
+  <h3>Outcome breakdown <span class="hint muted">receipt for plan #{{ summary.plan_id }}</span></h3>
+  <div style="display:flex;align-items:center;gap:38px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:24px">
+      <div class="donut" style="background:conic-gradient(var(--good) 0 {{ deg_done }}deg, var(--accent) {{ deg_done }}deg {{ deg_disp }}deg, var(--bad) {{ deg_disp }}deg {{ deg_fail }}deg, var(--muted) {{ deg_fail }}deg 360deg)">
+        <div class="d-inner"><div><div class="d-val">{{ total }}</div><div class="d-lbl">actions</div></div></div>
+      </div>
+      <div class="legend">
+        <div class="l-row"><span class="adot" style="background:var(--good)"></span> done <b>{{ summary.done }}</b></div>
+        <div class="l-row"><span class="adot" style="background:var(--accent)"></span> dispatched <b>{{ summary.dispatched }}</b></div>
+        <div class="l-row"><span class="adot" style="background:var(--bad)"></span> failed <b>{{ summary.failed }}</b></div>
+        <div class="l-row"><span class="adot" style="background:var(--muted)"></span> refused <b>{{ summary.refused }}</b></div>
+      </div>
+    </div>
+    <div class="gauge-wrap" style="margin-left:auto">
+      <div class="gauge" style="--pct:{{ (summary.done / total * 100)|round(0)|int }};--gc:{{ hero }}">
+        <div class="g-inner"><div><div class="g-val">{{ summary.done }}/{{ total }}</div><div class="g-pct">{{ (summary.done / total * 100)|round(0)|int }}%</div></div></div>
+      </div>
+      <div class="g-label">Completion</div>
+      <div class="g-cap">done vs all outcomes</div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<div class="panel rise-4">
+  <h3>Item results <span class="hint"><a href="/plans/{{ plan_id }}">View plan #{{ plan_id }} &rarr;</a></span></h3>
+  {% if summary['items'] %}
+  <table>
+    <thead>
+      <tr><th style="width:72px">Item</th><th>Action</th><th style="width:130px">Result</th><th style="width:104px">Mode</th><th>Detail</th></tr>
+    </thead>
+    <tbody>
+      {% for it in summary['items'] %}
+      <tr>
+        <td class="num muted">#{{ it.id }}</td>
+        <td><code>{{ it.action }}</code></td>
+        <td class="status-{{ it.result }}" style="font-weight:600;white-space:nowrap">
+          {% if it.result == 'done' %}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px"><polyline points="20 6 9 17 4 12"/></svg>
+          {% elif it.result == 'failed' %}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" style="vertical-align:-1px;margin-right:5px"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          {% elif it.result == 'refused' %}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:5px"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
+          {% else %}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:5px"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          {% endif %}{{ it.result }}
+        </td>
+        <td>
+          {% if it.dry_run is defined %}{% if it.dry_run %}<span class="badge dry">dry-run</span>{% else %}<span class="badge live">LIVE</span>{% endif %}{% else %}<span class="muted">&mdash;</span>{% endif %}
+        </td>
+        <td class="muted">{{ it.summary or it.reason or "—" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">
+    <div class="e-icon">
+      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/></svg>
+    </div>
+    No items in this dispatch — nothing was sent for plan #{{ summary.plan_id }}.
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

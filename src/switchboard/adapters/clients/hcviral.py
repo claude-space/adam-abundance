@@ -1,0 +1,40 @@
+"""HC Viral Hits client. Reads use the machine-facing API-key surface
+(``/api/cms/*``, header ``X-API-Key``); the ideate/poll/emaki triggers are
+session-authed and are exercised only by the (Phase-4) action adapter."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from ...logging_ import get_logger
+from ..base import AdapterUnavailable
+
+log = get_logger("client.hcviral")
+
+
+class HCViralClient:
+    def __init__(self, base_url: str, api_key: str | None) -> None:
+        self._base = base_url.rstrip("/")
+        self._api_key = api_key
+
+    def _headers(self) -> dict[str, str]:
+        if not self._api_key:
+            raise AdapterUnavailable("HC_VIRAL_HITS_API_KEY not configured")
+        return {"X-API-Key": self._api_key, "Accept": "application/json"}
+
+    async def _get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+        try:
+            import httpx  # type: ignore
+        except ImportError as exc:  # pragma: no cover
+            raise AdapterUnavailable("httpx not installed") from exc
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.get(f"{self._base}{path}", params=params, headers=self._headers())
+            resp.raise_for_status()
+            return resp.json()
+
+    async def list_drafts(self, brand: str, status: str | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"brand": brand}
+        if status:
+            params["status"] = status
+        data = await self._get("/api/cms/drafts", params)
+        return data if isinstance(data, list) else data.get("drafts", [])

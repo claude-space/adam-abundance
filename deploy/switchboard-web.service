@@ -1,0 +1,18 @@
+# /etc/systemd/system/switchboard-web.service
+# Native (venv) deploy of the Switchboard console. Adjust User/paths to the VM.
+[Unit]
+Description=Switchboard web console (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robert
+WorkingDirectory=/home/robert/switchboard
+EnvironmentFile=/home/robert/switchboard/switchboard.env
+ExecStart=/home/robert/switchboard/.venv/bin/switchboard serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

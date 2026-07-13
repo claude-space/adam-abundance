@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+{% block title %}Agents — Switchboard{% endblock %}
+{% block body %}
+
+{% set ns = namespace(entries=0, calls=0, actions=0, ro=0, active=0) %}
+{% for a in agents %}
+  {% set ns.entries = ns.entries + a.entries %}
+  {% set ns.calls = ns.calls + a.calls %}
+  {% set ns.actions = ns.actions + a.actions|length %}
+  {% if a.read_only %}{% set ns.ro = ns.ro + 1 %}{% endif %}
+  {% if a.last_active %}{% set ns.active = ns.active + 1 %}{% endif %}
+{% endfor %}
+{% set fns = namespace(fe=0) %}
+{% for f in feeders %}{% set fns.fe = fns.fe + f.entries %}{% endfor %}
+
+<div class="phero rise" style="--ph:#7c5cff">
+  <h2>
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/></svg>
+    </span>
+    Agent fleet
+  </h2>
+  <div class="ph-sub">Six domain workers plus the orchestrator — each owns exactly one domain and coordinates only through shared memory.</div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/></svg>
+      <b>{{ agents|length }}</b> agents
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg>
+      <b>{{ ns.entries }}</b> memory entries
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+      <b>{{ ns.calls }}</b> tool calls
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+      <b>{{ feeders|length }}</b> scheduled feeders
+    </span>
+    <span class="pillx">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/></svg>
+      <b>{{ ns.actions }}</b> governed actions
+    </span>
+  </div>
+</div>
+
+<div class="panel arch rise rise-2">
+  <h3>Architecture <span class="hint muted">§5 · agents never call each other — they meet in shared memory</span></h3>
+  <div class="plane human"><span class="tag">Human plane</span> <span class="sub2">editor / admin approve · decide — Slack (notify)</span></div>
+  <div class="flowlbl">▼ approve / decide &nbsp;·&nbsp; ▲ brief</div>
+  <div class="plane orch"><span class="tag">Orchestrator + Governor</span> <span class="sub2">synthesize plan → human approval → dispatch</span></div>
+  <div class="flowlbl">▲ dispatch approved plan_items &nbsp;·&nbsp; ▼ read all recent memory</div>
+  <div class="plane memory"><span class="tag">Shared memory — Postgres</span> <span class="sub2">typed entries · provenance · verified/claim · TTL</span></div>
+  <div class="flowlbl">▲ write findings &nbsp;·&nbsp; ▼ query by brand / type / freshness</div>
+  <div class="agents-row">
+    {% for a in agents if a.key != 'orchestrator' %}
+    <span class="anode"><span class="adot" style="background:{{ a.color }}"></span>{{ a.display }}</span>
+    {% endfor %}
+  </div>
+  <div class="flowlbl">▼ owned tool adapters — read → memory · act → governor-gated, dry-run by default</div>
+  <div class="plane"><span class="tag">Integration adapters</span> <span class="sub2">wrap the existing systems + external APIs</span></div>
+  <div class="plane"><span class="tag">Credentials &amp; access layer</span> <span class="sub2">service accounts · API keys — resolved at call time, redacted from logs</span></div>
+  <p class="flowlbl" style="margin:4px 0 0">Scheduled feeders (ranking-decay · content-audit) drop typed entries straight into memory — they are not agents.</p>
+</div>
+
+<div class="grid rise rise-3" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin:16px 0">
+  {% for a in agents %}
+  <a href="/agents/{{ a.key }}" class="card agent-card rise" style="--c:{{ a.color }};animation-delay:{{ '%.2f'|format(0.12 + loop.index0 * 0.05) }}s">
+    <div class="ac-head">
+      <span class="ac-mono" style="background:{{ a.color }}">{{ a.display[0] }}</span>
+      <div>
+        <div class="ac-name">{{ a.display }}</div>
+        <div class="ac-tag">{{ a.tagline }}</div>
+      </div>
+      <span class="ac-badge">{% if a.read_only %}read-only{% else %}{{ a.actions|length }} action{{ '' if a.actions|length == 1 else 's' }}{% endif %}</span>
+    </div>
+    <p class="ac-domain">{{ a.domain }}</p>
+    <div class="ac-tools">
+      {% for t in a.owns[:4] %}<span class="chip">{{ t }}</span>{% endfor %}
+      {% for t in a.actions[:3] %}<span class="chip act">⚡ {{ t }}</span>{% endfor %}
+      {% set extra = a.owns|length - 4 %}{% if extra > 0 %}<span class="chip">+{{ extra }}</span>{% endif %}
+      {% if not a.owns and not a.actions %}<span class="chip">memory only</span>{% endif %}
+    </div>
+    <div class="ac-stats">
+      <span><b>{{ a.entries }}</b> entries</span>
+      <span><b>{{ a.calls }}</b> tool calls</span>
+      <span style="margin-left:auto">{% if a.last_active %}<span class="pulse" style="margin-right:7px"></span>{{ a.last_active }}{% else %}idle{% endif %}</span>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+
+<div class="grid rise rise-4" style="grid-template-columns:1.6fr 1fr;margin:16px 0">
+  <div class="panel" style="margin:0">
+    <h3>Memory contribution by agent <span class="hint muted">entries written to shared memory</span></h3>
+    {% set maxe = agents|map(attribute='entries')|max %}
+    {% if ns.entries > 0 %}
+    <div class="fleet-list">
+      {% for a in agents|sort(attribute='entries', reverse=True) %}
+      <a href="/agents/{{ a.key }}" class="fleet-row">
+        <span class="fr-name"><span class="adot" style="background:{{ a.color }}"></span>{{ a.display }}</span>
+        <span class="fr-track"><span class="fr-fill" style="width:{{ ((a.entries / maxe * 100) if maxe else 0)|round(0)|int }}%;background:{{ a.color }}"></span></span>
+        <span class="fr-num">{{ a.entries }} entries</span>
+      </a>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty"><div class="e-icon">◌</div>No memory entries yet — the fleet hasn’t written any findings.</div>
+    {% endif %}
+  </div>
+  <div class="panel" style="margin:0">
+    <h3>Who writes memory <span class="hint muted">agents vs feeders</span></h3>
+    {% set total_mem = ns.entries + fns.fe %}
+    {% if total_mem > 0 %}
+    {% set adeg = (ns.entries / total_mem * 360)|round(1) %}
+    <div style="display:flex;align-items:center;gap:20px;flex-wrap:wrap;padding-top:6px">
+      <div class="donut" style="background:conic-gradient(#7c5cff 0 {{ adeg }}deg, #d6a021 {{ adeg }}deg 360deg)">
+        <div class="d-inner"><div><div class="d-val">{{ total_mem }}</div><div class="d-lbl">entries</div></div></div>
+      </div>
+      <div class="legend">
+        <div class="l-row"><span class="adot" style="background:#7c5cff"></span>Agents <b>{{ ns.entries }}</b></div>
+        <div class="l-row"><span class="adot" style="background:#d6a021"></span>Feeders <b>{{ fns.fe }}</b></div>
+      </div>
+    </div>
+    <div class="ratio" style="margin-top:18px">
+      <span style="width:{{ (ns.entries / total_mem * 100)|round(0)|int }}%;background:#7c5cff"></span>
+      <span style="width:{{ (fns.fe / total_mem * 100)|round(0)|int }}%;background:#d6a021"></span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-top:6px">
+      <span>agents {{ (ns.entries / total_mem * 100)|round(0)|int }}%</span>
+      <span>feeders {{ (fns.fe / total_mem * 100)|round(0)|int }}%</span>
+    </div>
+    {% else %}
+    <div class="empty"><div class="e-icon">◌</div>Nothing written yet — agents and feeders will show up here.</div>
+    {% endif %}
+    <div class="mini-kpis" style="margin-top:20px;border-top:1px solid var(--line);padding-top:14px">
+      <div><div class="v">{{ ns.active }}</div><div class="l">recently active</div></div>
+      <div><div class="v">{{ ns.ro }}</div><div class="l">read-only</div></div>
+      <div><div class="v">{{ agents|length - ns.ro }}</div><div class="l">action-enabled</div></div>
+    </div>
+  </div>
+</div>
+
+<div class="panel rise rise-4">
+  <h3>Scheduled feeders <span class="hint muted">— not agents; drop typed entries into memory on a schedule</span></h3>
+  {% if feeders %}
+  <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+    {% for f in feeders %}
+    <div class="card kpi tile" style="--c:#d6a021">
+      <div class="k-top">
+        <span class="k-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>
+        </span>
+        <span class="label">{{ f.display }}</span>
+      </div>
+      <div class="num sm">{{ f.entries }}</div>
+      <div class="foot">{{ f.domain }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty"><div class="e-icon">◌</div>No scheduled feeders configured.</div>
+  {% endif %}
+</div>
+
+<div class="card rise rise-4" style="display:flex;gap:14px;align-items:flex-start;margin-top:16px">
+  <span class="k-icon" style="width:30px;height:30px;border-radius:9px;display:grid;place-items:center;flex-shrink:0;background:color-mix(in srgb,var(--accent-2) 18%,transparent);color:var(--accent-2)">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/></svg>
+  </span>
+  <p class="muted" style="font-size:13px;margin:2px 0 0">
+    <b style="color:var(--ink-2)">Coordination rule:</b> agents never call each other or each other's tools. Every
+    finding is written to shared memory; any agent that needs it queries memory. The orchestrator dispatches by
+    writing approved plan items that the owning agent picks up.
+  </p>
+</div>
+
+{% endblock %}

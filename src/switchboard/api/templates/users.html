@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Users — Switchboard{% endblock %}
+{% block body %}
+{% set role_color = {'global_admin':'#7c5cff','portfolio_admin':'#5b9dff','brand_user':'#3fb950','viewer':'#6f7887'} %}
+{% set total_users = users|length %}
+{% set admin_ct = (role_counts.get('global_admin', 0) or 0) + (role_counts.get('portfolio_admin', 0) or 0) %}
+
+<div class="phero rise" style="--ph:#7c5cff">
+  <h2>
+    <span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+    Users &amp; roles
+  </h2>
+  <div class="ph-sub">§9.1 · Google identity → role · roles gate approvals, not tool credentials</div>
+  <div class="ph-stats">
+    <span class="pillx">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <b>{{ total_users }}</b> user{{ '' if total_users == 1 else 's' }}
+    </span>
+    {% for r, c in role_counts.items() %}
+    <span class="pillx"><span class="adot" style="background:{{ role_color.get(r, '#d6a021') }}"></span><b>{{ c }}</b> {{ role_labels.get(r, r) }}</span>
+    {% endfor %}
+    <span class="pillx">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+      <b>{{ brands|length }}</b> brand{{ '' if brands|length == 1 else 's' }}
+    </span>
+  </div>
+</div>
+
+<div class="grid rise-2" style="grid-template-columns:repeat(auto-fit,minmax(360px,1fr));margin:16px 0">
+
+  <div class="panel" style="margin:0">
+    <h3>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-2)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/></svg>
+      Access mix
+      <span class="hint muted">share of team by role</span>
+    </h3>
+    {% set ns = namespace(acc=0.0, grad='') %}
+    {% if total_users %}
+      {% for r in roles %}
+        {% set cnt = role_counts.get(r, 0) %}
+        {% if cnt %}
+          {% set deg = cnt * 360.0 / total_users %}
+          {% set ns.grad = ns.grad ~ role_color.get(r, '#d6a021') ~ ' ' ~ (ns.acc|round(2)) ~ 'deg ' ~ ((ns.acc + deg)|round(2)) ~ 'deg, ' %}
+          {% set ns.acc = ns.acc + deg %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+    <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+      <div class="donut" style="background:conic-gradient({{ ns.grad }}var(--surface-3) {{ ns.acc|round(2) }}deg 360deg)">
+        <div class="d-inner"><div><div class="d-val">{{ total_users }}</div><div class="d-lbl">users</div></div></div>
+      </div>
+      <div class="legend">
+        {% for r in roles %}
+        <div class="l-row"><span class="adot" style="background:{{ role_color.get(r, '#d6a021') }}"></span>{{ role_labels.get(r, r) }} <b>{{ role_counts.get(r, 0) }}</b></div>
+        {% endfor %}
+      </div>
+    </div>
+    {% if total_users %}
+    <div style="margin-top:18px">
+      <div class="ratio">
+        {% for r in roles %}{% set cnt = role_counts.get(r, 0) %}{% if cnt %}<span style="width:{{ (cnt * 100.0 / total_users)|round(1) }}%;background:{{ role_color.get(r, '#d6a021') }}"></span>{% endif %}{% endfor %}
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:7px">{{ admin_ct }} of {{ total_users }} can approve &amp; dispatch across any brand</div>
+    </div>
+    {% else %}
+    <div class="empty" style="padding:20px"><div class="e-icon">◔</div>No access data yet.</div>
+    {% endif %}
+  </div>
+
+  <div class="panel" style="margin:0">
+    <h3>
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-2)" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6l7-3z"/></svg>
+      Role permissions
+      <span class="hint muted">what each role can do</span>
+    </h3>
+    {% set check %}<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="var(--good)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px"><polyline points="20 6 9 17 4 12"/></svg>{% endset %}
+    {% set nope %}<span class="muted">—</span>{% endset %}
+    <table>
+      <thead>
+        <tr><th>Role</th><th>View</th><th>Approve / dispatch</th><th>Scope</th><th>Manage users</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="adot" style="background:#7c5cff"></span><b>Global admin</b></td>
+          <td>{{ check }}</td><td>{{ check }}</td>
+          <td><span class="badge accent">any brand</span></td>
+          <td>{{ check }}</td>
+        </tr>
+        <tr>
+          <td><span class="adot" style="background:#5b9dff"></span><b>Portfolio admin</b></td>
+          <td>{{ check }}</td><td>{{ check }}</td>
+          <td><span class="badge accent">any brand</span></td>
+          <td>{{ nope }}</td>
+        </tr>
+        <tr>
+          <td><span class="adot" style="background:#3fb950"></span><b>Brand user</b></td>
+          <td>{{ check }}</td><td>{{ check }}</td>
+          <td><span class="badge ok">assigned brands</span></td>
+          <td>{{ nope }}</td>
+        </tr>
+        <tr>
+          <td><span class="adot" style="background:#6f7887"></span><b>Viewer</b></td>
+          <td>{{ check }}</td><td>{{ nope }}</td>
+          <td><span class="badge muted">read-only</span></td>
+          <td>{{ nope }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+
+<div class="panel rise-3">
+  <h3>
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="var(--accent-2)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    Team directory
+    <span class="hint muted">role changes apply immediately</span>
+  </h3>
+  <table>
+    <thead>
+      <tr><th>User</th><th>Role</th><th>Brand scope</th><th>Since</th><th>Change role</th></tr>
+    </thead>
+    <tbody>
+      {% for u in users %}
+      <tr>
+        <td>
+          <div style="display:flex;align-items:center;gap:11px">
+            {% set pl = u.email.split('@')[0]|replace('.', ' ')|replace('_', ' ')|replace('-', ' ') %}
+            {% set pw = pl.split() %}
+            <span class="avatar" style="background:linear-gradient(135deg,{{ role_color.get(u.role, '#5b9dff') }},var(--accent-2))">{% if pw|length >= 2 %}{{ (pw[0][:1] ~ pw[1][:1])|upper }}{% elif pl %}{{ pl[:2]|upper }}{% else %}?{% endif %}</span>
+            <div>
+              <div style="font-weight:600">{{ u.email }}</div>
+              {% if u.name %}<div class="muted" style="font-size:12px">{{ u.name }}</div>{% endif %}
+            </div>
+          </div>
+        </td>
+        <td><span class="badge {{ 'accent' if u.role in ['global_admin','portfolio_admin'] else ('muted' if u.role=='viewer' else '') }}">{{ role_labels.get(u.role, u.role) }}</span></td>
+        <td>
+          {% if u.brands %}
+            {% for b in u.brands %}<span class="chip">{{ b }}</span> {% endfor %}
+          {% elif u.role in ['global_admin','portfolio_admin'] %}
+            <span class="badge ok">all brands</span>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
+        <td class="muted" style="white-space:nowrap;font-variant-numeric:tabular-nums">{{ u.created_at }}</td>
+        <td>
+          <form method="post" action="/users/set-role" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+            <input type="hidden" name="email" value="{{ u.email }}"/>
+            <select name="role">
+              {% for r in roles %}<option value="{{ r }}" {{ 'selected' if r==u.role }}>{{ role_labels.get(r,r) }}</option>{% endfor %}
+            </select>
+            <input name="brands" placeholder="brands (for brand_user)" value="{{ u.brands|join(',') if u.brands }}" style="width:170px"/>
+            <button class="ghost" type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5"><div class="empty"><div class="e-icon">◔</div>No users yet — accounts appear here after their first Google sign-in.</div></td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

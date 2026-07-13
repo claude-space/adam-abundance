@@ -1,0 +1,67 @@
+{
+  "name": "adam-abundance",
+  "display_name": "Switchboard — Auto Ops",
+  "description": "Switchboard: an orchestration + shared-memory (Postgres) console over the Valnet Auto portfolio (HotCars, CarBuzz, TopSpeed). FastAPI + server-rendered Jinja UI, Supabase-backed, Google-OAuth gated. Read-only by default with a human approval gate and a spend governor before any live action. Visible at /agents/<slug>/ once provisioned; workflow steps can call /api/data (JSON) or POST /run (text summary).",
+  "category": "ops",
+  "language": "python",
+  "framework": "fastapi",
+  "tags": [
+    "dashboard",
+    "orchestration",
+    "fastapi",
+    "supabase",
+    "valnet-ops",
+    "auto",
+    "viewable"
+  ],
+  "endpoints": [
+    {
+      "path": "/",
+      "method": "GET",
+      "description": "The approval console UI (HTML). Visible at /agents/<slug>/ on shellagent.io. Login-gated (Google OAuth)."
+    },
+    {
+      "path": "/api/data",
+      "method": "GET",
+      "description": "JSON aggregates of shared-memory + plan + spend state — for workflow consumption. No secrets, no raw editorial content."
+    },
+    {
+      "path": "/api/health",
+      "method": "GET",
+      "description": "Liveness probe. Public, no DB required."
+    },
+    {
+      "path": "/run",
+      "method": "POST",
+      "description": "Workflow step endpoint. Bearer-token auth (SWITCHBOARD_RUN_TOKEN). Body {\"input\": \"...\"} -> {\"output\": \"...\"}. Read-only status summary; never triggers actions or spend."
+    }
+  ],
+  "workflow_integration": {
+    "callable_as_agent": true,
+    "run_endpoint": "/run",
+    "output_shape_from_api_data": {
+      "rows": "array — recent plans (id, brand, plan_date, status, items)",
+      "summary": "object — memory-by-type counts, active_flags, verified_facts, spend today"
+    },
+    "example_workflow": [
+      "Workflow: 'Daily Auto ops digest'",
+      "1. Trigger: cron, 9am weekdays",
+      "2. Agent step: POST this agent's /run with {\"input\": \"portfolio\"}",
+      "3. slack.message.send: post {{previous_output}} to #auto-ops"
+    ]
+  },
+  "runtime": {
+    "process_manager": "pm2",
+    "config": "ecosystem.config.js",
+    "bootstrap": "deploy/bootstrap.sh",
+    "port_env": "PORT",
+    "note": "Python app: run deploy/bootstrap.sh once (venv + pip install + alembic upgrade) before the first `pm2 start`. Do NOT run npm install / npm run build."
+  },
+  "post_provision_notes": [
+    "This is a Python/FastAPI app (not the Next.js scaffold it was created from). The deploy webhook should NOT run `npm install`/`npm run build`; instead run `deploy/bootstrap.sh` once, then `git pull && pm2 reload ecosystem.config.js --update-env` on each push.",
+    "Caddy strip_prefix routing: the app runs locally at / but Caddy serves it under /agents/<slug>/. Set APP_BASE_PATH=/agents/<slug> in .env so server-rendered links + redirects carry the prefix (handled centrally in app.py middleware — no per-template changes).",
+    "Config + secrets live in a repo-local .env (gitignored), loaded by ecosystem.config.js. Populate it from .env.prod.example. Never commit .env.",
+    "Database is Supabase Postgres via the pooler on port 5432; keep DB_STATEMENT_CACHE_SIZE=0 for asyncpg pooler compatibility.",
+    "Spend caps are OFF by default here (SPEND_CAPS_ENABLED=0) and Slack is intentionally NOT wired. Start with SWITCHBOARD_KILL_SWITCH=1 (observe/plan only) and flip live per-action when ready."
+  ]
+}
