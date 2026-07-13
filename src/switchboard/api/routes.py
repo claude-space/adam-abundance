@@ -208,6 +208,21 @@ async def home(request: Request):
     )
 
 
+@router.get("/overview", response_class=HTMLResponse)
+async def overview(request: Request):
+    """"How it works" — a static orientation page. No DB, so it renders even on a
+    fresh deploy. The agent fleet is driven by AGENT_META (same source as /agents)."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    settings = get_settings()
+    return templates.TemplateResponse(
+        request, "overview.html",
+        {"user": user, "kill_switch": settings.kill_switch, "agents": AGENT_META,
+         "caps_enabled": settings.caps.enabled, "brands": list(settings.brand_keys)},
+    )
+
+
 @router.post("/cycle")
 async def trigger_cycle(request: Request, brand: str = Form(...)):
     require_user(request)
