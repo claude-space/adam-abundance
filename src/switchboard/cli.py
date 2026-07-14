@@ -192,6 +192,45 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     return asyncio.run(run_scheduler())
 
 
+def cmd_trend_scan(args: argparse.Namespace) -> int:
+    from .trends.scout import run_trend_scan
+
+    settings = get_settings()
+    if not settings.is_valid_scope(args.brand):
+        print(f"Unknown brand '{args.brand}' — use portfolio or one of "
+              f"{list(settings.brand_keys)}.")
+        return 1
+
+    async def _run() -> int:
+        summary = await run_trend_scan(args.brand)
+        if not summary.get("enabled", True):
+            print("Trend pipeline is disabled (TREND_PIPELINE_ENABLED=0).")
+            return 0
+        if summary.get("error"):
+            print(f"Scan refused: {summary['error']}")
+            return 1
+        print(f"Trend scan ({args.brand}): {summary['signals']} signals -> "
+              f"{summary['clusters']} clusters; new={summary['new_trends']} "
+              f"updated={summary['updated_trends']} proposed={summary['proposed']} "
+              f"suppressed={summary['suppressed']} expired={summary['expired']}")
+        if summary.get("proposed"):
+            print("Review pending trigger requests at /trends (switchboard serve).")
+        return 0
+
+    return asyncio.run(_run())
+
+
+def cmd_pipeline_worker(args: argparse.Namespace) -> int:
+    from .trends.pipeline import run_job_sweep
+
+    async def _run() -> int:
+        result = await run_job_sweep(limit=args.limit)
+        print(f"Job sweep: ok={result['ok']} pending={result['pending']} failed={result['failed']}")
+        return 0
+
+    return asyncio.run(_run())
+
+
 def cmd_dispatch(args: argparse.Namespace) -> int:
     from .context import RunContext
     from .orchestrator.dispatch import Dispatcher
@@ -253,9 +292,18 @@ def build_parser() -> argparse.ArgumentParser:
     pl.set_defaults(func=cmd_plan)
 
     fd = sub.add_parser("feed", help="run a scheduled feeder once")
-    fd.add_argument("feeder", choices=["decay", "content_audit"])
+    fd.add_argument("feeder", choices=["decay", "content_audit", "trend_scan"])
     fd.add_argument("brand")
     fd.set_defaults(func=cmd_feed)
+
+    ts = sub.add_parser("trend-scan", help="run one competitor trend scan (sources -> trends -> trigger requests)")
+    ts.add_argument("brand", nargs="?", default="portfolio",
+                    help="portfolio (default) or a single brand key")
+    ts.set_defaults(func=cmd_trend_scan)
+
+    pw = sub.add_parser("pipeline-worker", help="process queued/stuck content-pipeline jobs once")
+    pw.add_argument("--limit", type=int, default=5)
+    pw.set_defaults(func=cmd_pipeline_worker)
 
     dsp = sub.add_parser("dispatch", help="dispatch an approved plan's items (governor-gated)")
     dsp.add_argument("plan_id", type=int)

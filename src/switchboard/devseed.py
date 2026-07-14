@@ -67,6 +67,36 @@ async def seed_brand(brand: str) -> int:  # pragma: no cover - dev utility
                                  source_system="newsletter",
                                  payload={"kind": "newsletter_draft", "status": "inputs_ready",
                                           "artifact_ref": None}))
+    # Trend-pipeline vocabulary (docs/trend-pipeline.md): raw signals the scout
+    # clusters, plus the flag the scout raises for the morning planner.
+    drafts += [
+        EntryDraft(type=EntryType.CONTEXT, brand="portfolio", source_agent="research",
+                   source_system="tavily",
+                   payload={"kind": "trend_signals", "origin": "tavily", "item_count": 2,
+                            "items": [
+                                {"origin": "tavily", "source": "caranddriver.com",
+                                 "title": "Tesla recalls 300k Model Y over steering fault",
+                                 "url": "https://example.com/tesla-recall-cd",
+                                 "published_at": "2026-07-13T09:00:00+00:00", "snippet": ""},
+                                {"origin": "tavily", "source": "motor1.com",
+                                 "title": "Tesla Model Y recall: what owners need to know",
+                                 "url": "https://example.com/tesla-recall-m1",
+                                 "published_at": "2026-07-13T10:30:00+00:00", "snippet": ""},
+                            ]},
+                   ttl_seconds=24 * 3600),
+        EntryDraft(type=EntryType.FLAG, brand=brand, source_agent="trend_scout",
+                   source_system="trend_scan",
+                   payload={"kind": "competitor_trend", "trend_id": 0,
+                            "headline": "Tesla recalls 300k Model Y over steering fault",
+                            "score": 74, "severity": "high"},
+                   source_urls=["https://example.com/tesla-recall-cd"]),
+        EntryDraft(type=EntryType.CLAIM, brand=brand, source_agent="trend_scout",
+                   source_system="trend_dossier",
+                   payload={"kind": "trend_key_fact", "trend_id": 0,
+                            "statement": "The recall covers 300,000 Model Y vehicles built 2024-2026",
+                            "needs_verification": True},
+                   source_urls=["https://example.com/tesla-recall-cd"], confidence=0.5),
+    ]
     async with RunContext.open() as ctx:
         rows = await ctx.store.write_many(drafts)
     return len(rows)

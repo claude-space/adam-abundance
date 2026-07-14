@@ -132,6 +132,40 @@ class ArtifactConfig:
     local_dir: str = "./local_artifacts"
 
 
+# Content types the trend pipeline can generate, with their default transport.
+# Transports: 'llm' (built-in governed drafting — always available),
+# 'hc_viral_hits' (force-add-from-url → brief → full pipeline → Emaki draft),
+# 'social_api' (social-media-posts-creator), 'newsletter_api'
+# (newsletter-creator-auto), 'shellagent_run' (generic POST /run contract).
+_TREND_CONTENT_TYPES: dict[str, str] = {
+    "article": "llm",
+    "social_post": "llm",
+    "newsletter_blurb": "llm",
+    "video_script": "llm",
+}
+
+
+@dataclass(frozen=True)
+class TrendConfig:
+    """Competitor-trend pipeline knobs (docs/trend-pipeline.md). Config, not code."""
+
+    enabled: bool = True
+    scan_interval_min: int = 120              # trend_scan cadence
+    score_threshold: float = 60.0             # propose a pipeline at/above this
+    min_sources: int = 2                      # distinct outlets before a cluster is a trend
+    max_open_pipelines: int = 5               # per brand; scout stops proposing beyond this
+    ttl_hours: int = 48                       # perishability: unactioned trends expire
+    dedup_days: int = 5                       # don't re-propose a dismissed/expired cluster within this
+    auto_dossier: bool = True                 # build the dossier as soon as a trend is proposed
+    base_query: str = "automotive industry news"  # what the source APIs are asked for
+    watchlist: tuple[str, ...] = ()           # boosted terms (TREND_WATCHLIST, csv)
+    default_content_types: tuple[str, ...] = ("article", "social_post")
+    transports: dict[str, str] = field(default_factory=lambda: dict(_TREND_CONTENT_TYPES))
+
+    def transport_for(self, content_type: str) -> str:
+        return self.transports.get(content_type, "llm")
+
+
 # Default TTLs (seconds) per entry type — freshness scoping for the TTL sweep
 # (PRD §7.1). Facts/decisions are durable; metrics/context are short-lived.
 _DEFAULT_TTLS: dict[str, int | None] = {
@@ -160,6 +194,7 @@ class Settings:
     caps: SpendCaps = field(default_factory=SpendCaps)
     auth: AuthConfig = field(default_factory=AuthConfig)
     artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
+    trends: TrendConfig = field(default_factory=TrendConfig)
     ttls: dict[str, int | None] = field(default_factory=lambda: dict(_DEFAULT_TTLS))
     endpoints: dict[str, str] = field(default_factory=dict)
 
@@ -252,11 +287,50 @@ def get_settings() -> Settings:
         local_dir=creds.resolve("ARTIFACT_LOCAL_DIR", secret=False) or "./local_artifacts",
     )
 
+    def _get_float(key: str, default: float) -> float:
+        raw = creds.resolve(key, secret=False)
+        try:
+            return float(raw) if raw not in (None, "") else default
+        except ValueError:
+            log.warning("Config %s is not a float; using default", key)
+            return default
+
+    transports = dict(_TREND_CONTENT_TYPES)
+    for ct in transports:
+        override = creds.resolve(f"TREND_TRANSPORT_{ct.upper()}", secret=False)
+        if override:
+            transports[ct] = override.strip().lower()
+    # Validate the default content types at load time — a typo here must degrade
+    # to the built-in defaults, not abort (and re-bill) every scheduled scan.
+    raw_defaults = _csv(creds.resolve("TREND_DEFAULT_CONTENT_TYPES", secret=False))
+    default_types = tuple(t.lower() for t in raw_defaults if t.lower() in _TREND_CONTENT_TYPES)
+    dropped = [t for t in raw_defaults if t.lower() not in _TREND_CONTENT_TYPES]
+    if dropped:
+        log.warning("TREND_DEFAULT_CONTENT_TYPES: dropping unknown type(s) %s (valid: %s)",
+                    dropped, list(_TREND_CONTENT_TYPES))
+    trends = TrendConfig(
+        enabled=_get_bool(creds, "TREND_PIPELINE_ENABLED", True),
+        scan_interval_min=_get_int(creds, "TREND_SCAN_INTERVAL_MIN", 120),
+        score_threshold=_get_float("TREND_SCORE_THRESHOLD", 60.0),
+        min_sources=_get_int(creds, "TREND_MIN_SOURCES", 2),
+        max_open_pipelines=_get_int(creds, "TREND_MAX_OPEN_PIPELINES", 5),
+        ttl_hours=_get_int(creds, "TREND_TTL_HOURS", 48),
+        dedup_days=_get_int(creds, "TREND_DEDUP_DAYS", 5),
+        auto_dossier=_get_bool(creds, "TREND_AUTO_DOSSIER", True),
+        base_query=creds.resolve("TREND_BASE_QUERY", secret=False) or "automotive industry news",
+        watchlist=_csv(creds.resolve("TREND_WATCHLIST", secret=False)),
+        default_content_types=default_types or ("article", "social_post"),
+        transports=transports,
+    )
+
     endpoints = {
         "albert": creds.resolve("ALBERT_API_URL", secret=False) or "http://localhost:3100",
         "seona": creds.resolve("SEONA_API_URL", secret=False) or "http://localhost:3110",
         "hc_viral_hits": creds.resolve("HC_VIRAL_HITS_API_URL", secret=False) or "http://127.0.0.1:8001",
         "writers_dashboard": creds.resolve("WRITERS_DASHBOARD_URL", secret=False) or "http://localhost:3001",
+        # Same env names the assemble actions already use (adapters/actions.py).
+        "social": creds.resolve("SOCIAL_API_URL", secret=False) or "http://localhost:3145",
+        "newsletter": creds.resolve("NEWSLETTER_API_URL", secret=False) or "http://localhost:5200",
     }
 
     # Caddy on the ShellAgent VM serves this under /agents/<slug>/ (strip_prefix),
@@ -276,6 +350,7 @@ def get_settings() -> Settings:
         caps=caps,
         auth=auth,
         artifacts=artifacts,
+        trends=trends,
         endpoints=endpoints,
     )
     log.info(

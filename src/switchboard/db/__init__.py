@@ -3,12 +3,15 @@ coordination substrate; all cross-agent state lives here."""
 
 from .base import Base, get_engine, get_sessionmaker, session_scope
 from .enums import (
+    ContentJobStatus,
     EntryStatus,
     EntryType,
+    PipelineStatus,
     PlanItemStatus,
     PlanStatus,
     SpendMetric,
     ToolAction,
+    TrendStatus,
 )
 
 __all__ = [
@@ -20,6 +23,9 @@ __all__ = [
     "EntryStatus",
     "PlanStatus",
     "PlanItemStatus",
+    "TrendStatus",
+    "PipelineStatus",
+    "ContentJobStatus",
     "ToolAction",
     "SpendMetric",
 ]

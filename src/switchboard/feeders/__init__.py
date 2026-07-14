@@ -10,8 +10,10 @@ read and the orchestrator folds into the plan.
 from ..context import RunContext
 from .content_audit import ContentAuditFeeder
 from .decay import DecayScanFeeder
+from .trend_scan import TrendScanFeeder
 
-_FEEDERS = {"decay": DecayScanFeeder, "content_audit": ContentAuditFeeder}
+_FEEDERS = {"decay": DecayScanFeeder, "content_audit": ContentAuditFeeder,
+            "trend_scan": TrendScanFeeder}
 
 
 def build_feeder(name: str, ctx: RunContext):
@@ -25,4 +27,4 @@ async def run_feeder(name: str, brand: str) -> int:
         return await build_feeder(name, ctx).run(brand)
 
 
-__all__ = ["DecayScanFeeder", "ContentAuditFeeder", "build_feeder", "run_feeder"]
+__all__ = ["DecayScanFeeder", "ContentAuditFeeder", "TrendScanFeeder", "build_feeder", "run_feeder"]

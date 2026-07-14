@@ -1,0 +1,61 @@
+{% extends 'base.html' %}
+{% block title %}Pipelines — Switchboard{% endblock %}
+{% block body %}
+
+<div class="phero" style="--ph:#5b9dff">
+  <h2><span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.5 6h9M6.2 8.2 10.8 16M17.8 8.2 13.2 16"/></svg></span>
+    Content pipelines</h2>
+  <div class="ph-sub">Trend → approval → generation → preview review → gated publish. Every step is recorded; nothing goes out on its own.</div>
+  <div class="ph-stats">
+    <span class="pillx">awaiting approval <b>{{ counts.get('pending_approval', 0) }}</b></span>
+    <span class="pillx">generating <b>{{ counts.get('generating', 0) + counts.get('approved', 0) }}</b></span>
+    <span class="pillx">previews ready <b>{{ counts.get('previews_ready', 0) }}</b></span>
+    <span class="pillx">published <b>{{ counts.get('published', 0) + counts.get('partially_published', 0) }}</b></span>
+  </div>
+</div>
+
+<div class="toolbar" style="margin-bottom:16px">
+  <form method="get" action="/pipelines" class="inline">
+    <label>brand
+      <select name="brand" onchange="this.form.submit()">
+        <option value="">all</option>
+        <option value="portfolio" {% if f.brand=='portfolio' %}selected{% endif %}>portfolio</option>
+        {% for b in brands %}<option value="{{ b }}" {% if f.brand==b %}selected{% endif %}>{{ b }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>status
+      <select name="status" onchange="this.form.submit()">
+        <option value="">all</option>
+        {% for s in ['pending_approval','approved','generating','previews_ready','published','partially_published','declined','closed','failed','expired'] %}
+        <option value="{{ s }}" {% if f.status==s %}selected{% endif %}>{{ s|replace('_',' ') }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</div>
+
+<div class="panel">
+  {% if pipelines %}
+  <table>
+    <thead><tr><th>#</th><th>Trend</th><th>Brand</th><th>Content</th><th>Status</th><th>Requested by</th><th>Created</th></tr></thead>
+    <tbody>
+    {% for p in pipelines %}
+      <tr>
+        <td><a href="/pipelines/{{ p.id }}">#{{ p.id }}</a></td>
+        <td><a href="/pipelines/{{ p.id }}">{{ p.headline }}</a>
+          {% if p.trend_score %}<span class="badge accent">score {{ p.trend_score }}</span>{% endif %}</td>
+        <td>{{ p.brand }}</td>
+        <td>{% for ct in p.content_types %}<span class="chip">{{ ct|replace('_',' ') }}</span> {% endfor %}</td>
+        <td><span class="status-{{ p.status }}">{{ p.status|replace('_',' ') }}</span></td>
+        <td class="muted">{{ p.requested_by }}</td>
+        <td class="muted">{{ p.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty"><div class="e-icon">🛠</div>No pipelines yet — trigger one from the <a href="/trends">Trend Radar</a>.</div>
+  {% endif %}
+</div>
+
+{% endblock %}

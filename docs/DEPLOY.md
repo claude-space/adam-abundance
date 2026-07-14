@@ -128,9 +128,11 @@ halts all dispatch/live actions while observe keeps running.
 | `switchboard cycle <brand>` | observe all agents → draft plan (no dispatch) |
 | `switchboard plan <brand>` | re-synthesize a plan from current memory |
 | `switchboard dispatch <plan_id>` | dispatch an approved plan (governor-gated) |
-| `switchboard feed decay\|content_audit <brand>` | run a feeder once |
+| `switchboard feed decay\|content_audit\|trend_scan <brand>` | run a feeder once |
+| `switchboard trend-scan [brand]` | one competitor trend scan (sources → trends → trigger requests) |
+| `switchboard pipeline-worker` | process queued/stuck content-pipeline jobs once |
 | `switchboard sweep` | expire stale + supersede duplicate memory |
-| `switchboard schedule` | run the cron loop (cycle 7:30 ET + feeders) |
+| `switchboard schedule` | run the cron loop (cycle 7:30 ET + feeders + trend scan + job sweep) |
 | `switchboard serve` | the web console |
 
 Logs: `journalctl -u switchboard-web -f` / `-u switchboard-scheduler -f`.

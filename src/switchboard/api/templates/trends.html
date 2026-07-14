@@ -1,0 +1,150 @@
+{% extends 'base.html' %}
+{% block title %}Trend Radar — Switchboard{% endblock %}
+{% block body %}
+
+<div class="phero" style="--ph:#26c6a6">
+  <h2><span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></span>
+    Trend Radar</h2>
+  <div class="ph-sub">Competitor trends clustered from Tavily · Perplexity · Firecrawl · NewsAPI · competitor RSS.
+    Hot trends file a pipeline request — nothing generates or publishes without your approval.</div>
+  <div class="ph-stats">
+    <span class="pillx">open trends <b>{{ stats.open }}</b></span>
+    <span class="pillx">awaiting approval <b>{{ stats.pending }}</b></span>
+    <span class="pillx">generating <b>{{ stats.generating }}</b></span>
+    <span class="pillx">previews ready <b>{{ stats.previews }}</b></span>
+    <span class="pillx">coverage gaps <b>{{ stats.gaps }}</b></span>
+  </div>
+</div>
+
+{% if scanning %}
+<div class="panel" style="border-color:color-mix(in srgb,#26c6a6 45%,transparent)">
+  <b>Scan started.</b> <span class="muted">Sourcing + clustering (and dossiers for hot trends) can take a minute — refresh this page shortly.</span>
+</div>
+{% endif %}
+
+<div class="toolbar" style="margin-bottom:16px">
+  <form method="get" action="/trends" class="inline">
+    <label>brand
+      <select name="brand" onchange="this.form.submit()">
+        <option value="">all</option>
+        <option value="portfolio" {% if f.brand=='portfolio' %}selected{% endif %}>portfolio</option>
+        {% for b in brands %}<option value="{{ b }}" {% if f.brand==b %}selected{% endif %}>{{ b }}</option>{% endfor %}
+      </select>
+    </label>
+  </form>
+  <form method="post" action="/trends/scan" class="inline">
+    <input type="hidden" name="brand" value="{{ f.brand or 'portfolio' }}" />
+    <button type="submit">Scan now</button>
+  </form>
+</div>
+
+{% if pending %}
+<div class="panel" style="border-color:color-mix(in srgb,var(--warn) 45%,transparent)">
+  <h3>Pipeline requests awaiting a decision
+    <span class="hint muted">approve to generate content · decline to close</span></h3>
+  <table>
+    <thead><tr><th>Trend</th><th>Brand</th><th>Content</th><th>Requested by</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+    {% for p in pending %}
+      <tr>
+        <td><a href="/pipelines/{{ p.id }}">{{ p.headline }}</a>
+          {% if p.trend_score %}<span class="badge accent">score {{ p.trend_score }}</span>{% endif %}</td>
+        <td>{{ p.brand }}</td>
+        <td>{% for ct in p.content_types %}<span class="chip">{{ ct|replace('_',' ') }}</span> {% endfor %}</td>
+        <td class="muted">{{ p.requested_by }}</td>
+        <td class="muted">{{ p.created_at }}</td>
+        <td style="white-space:nowrap">
+          {% if p.can_approve %}
+          <form method="post" action="/pipelines/{{ p.id }}/approve" class="inline">
+            <button type="submit">Approve</button>
+          </form>
+          <form method="post" action="/pipelines/{{ p.id }}/decline" class="inline">
+            <button type="submit" class="danger" onclick="return confirm('Decline this pipeline request?')">Decline</button>
+          </form>
+          {% else %}<span class="badge muted">approver role required</span>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h3>Open trends <span class="hint muted">ranked by score · min {{ trend_cfg.min_sources }} outlets · propose at ≥ {{ trend_cfg.score_threshold|int }}</span></h3>
+  {% if trends %}
+  <table>
+    <thead><tr><th>Score</th><th>Trend</th><th>Signals</th><th>Status</th><th>Seen</th><th></th></tr></thead>
+    <tbody>
+    {% for t in trends %}
+      <tr>
+        <td class="num"><b>{{ t.score }}</b></td>
+        <td>
+          <a href="/trends/{{ t.id }}">{{ t.headline }}</a><br>
+          {% if t.breaking %}<span class="badge live">breaking</span>{% endif %}
+          {% if t.covered_by_us == false %}<span class="badge accent">coverage gap</span>{% endif %}
+          {% if t.covered_by_us == true %}<span class="badge muted">we covered it</span>{% endif %}
+          {% if t.watchlisted %}<span class="badge dry">watchlist</span>{% endif %}
+          {% if t.origin == 'manual' %}<span class="badge muted">manual</span>{% endif %}
+          {% for o in t.oems[:3] %}<span class="chip">{{ o }}</span>{% endfor %}
+        </td>
+        <td class="num">{{ t.source_count }} outlets · {{ t.signal_count }} items</td>
+        <td><span class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</span>
+          {% if t.pending_pipeline_id %}<br><a href="/pipelines/{{ t.pending_pipeline_id }}" class="badge dry">request pending</a>{% endif %}</td>
+        <td class="muted">{{ t.last_seen or t.first_seen }}</td>
+        <td style="white-space:nowrap">
+          {% if not t.pending_pipeline_id and t.status in ('detected','dossier_building','proposed') %}
+            <a href="/trends/{{ t.id }}"><button type="button" class="ghost">Trigger…</button></a>
+          {% endif %}
+          {% if t.can_approve and t.status in ('detected','dossier_building','proposed') %}
+          <form method="post" action="/trends/{{ t.id }}/dismiss" class="inline">
+            <button type="submit" class="ghost" onclick="return confirm('Dismiss this trend? A matching cluster will not be re-proposed for {{ trend_cfg.dedup_days }} days.')">Dismiss</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty"><div class="e-icon">📡</div>No open trends. Run a scan, or add one manually below.</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h3>Add a trend manually <span class="hint muted">rides the same dossier → approval → generation path</span></h3>
+  <form method="post" action="/trends/manual">
+    <div class="toolbar">
+      <label>topic / headline<br><input type="text" name="topic" size="46" placeholder="e.g. Tesla recalls 300k Model Y over steering fault" required /></label>
+      <label>source URL (optional)<br><input type="text" name="url" size="34" placeholder="https://…" /></label>
+      <label>brand<br>
+        <select name="brand">
+          <option value="portfolio">portfolio</option>
+          {% for b in brands %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
+        </select>
+      </label>
+      <button type="submit">Add trend</button>
+    </div>
+  </form>
+</div>
+
+{% if closed %}
+<div class="panel">
+  <h3>Recently closed <span class="hint muted">dismissed / declined / expired / completed — dedup window {{ trend_cfg.dedup_days }}d</span></h3>
+  <table>
+    <thead><tr><th>Trend</th><th>Score</th><th>Status</th><th>Seen</th></tr></thead>
+    <tbody>
+    {% for t in closed %}
+      <tr>
+        <td><a href="/trends/{{ t.id }}">{{ t.headline }}</a></td>
+        <td class="num">{{ t.score }}</td>
+        <td><span class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</span></td>
+        <td class="muted">{{ t.last_seen or t.first_seen }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

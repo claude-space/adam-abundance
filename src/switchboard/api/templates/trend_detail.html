@@ -1,0 +1,165 @@
+{% extends 'base.html' %}
+{% block title %}Trend #{{ t.id }} — Switchboard{% endblock %}
+{% block body %}
+
+<div class="pagehead">
+  <h2>{{ t.headline }}</h2>
+  <span class="sub"><a href="/trends">← Trend Radar</a></span>
+</div>
+
+<div class="phero" style="--ph:#26c6a6">
+  <div class="ph-stats">
+    <span class="pillx">score <b>{{ t.score }}</b></span>
+    <span class="pillx">status <b class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</b></span>
+    <span class="pillx">brand <b>{{ t.brand }}</b></span>
+    <span class="pillx">outlets <b>{{ t.source_count }}</b></span>
+    <span class="pillx">signals <b>{{ t.signal_count }}</b></span>
+    {% if t.velocity %}<span class="pillx">velocity <b>{{ t.velocity }}/h</b></span>{% endif %}
+    {% if t.expires_at %}<span class="pillx">expires <b>{{ t.expires_at }}</b></span>{% endif %}
+  </div>
+  <div class="ph-stats">
+    {% if t.breaking %}<span class="badge live">breaking</span>{% endif %}
+    {% if t.covered_by_us == false %}<span class="badge accent">coverage gap — we have not covered this</span>{% endif %}
+    {% if t.covered_by_us == true %}<span class="badge muted">we already covered this</span>{% endif %}
+    {% if t.watchlisted %}<span class="badge dry">watchlist match</span>{% endif %}
+    {% for o in t.oems %}<span class="chip">{{ o }}</span>{% endfor %}
+  </div>
+</div>
+
+{% if t.pending_pipeline_id %}
+<div class="panel" style="border-color:color-mix(in srgb,var(--warn) 45%,transparent)">
+  <h3>A pipeline request is already pending</h3>
+  <a href="/pipelines/{{ t.pending_pipeline_id }}">Review request #{{ t.pending_pipeline_id }} →</a>
+</div>
+{% elif t.status in ('detected','dossier_building','proposed') %}
+<div class="panel" style="border-color:color-mix(in srgb,#26c6a6 45%,transparent)">
+  <h3>Trigger a content pipeline
+    <span class="hint muted">creates a request{% if can_approve %} — or create &amp; approve in one step{% endif %}</span></h3>
+  <form method="post" action="/trends/{{ t.id }}/trigger">
+    <div class="toolbar">
+      <span>
+        <label>content types</label><br>
+        {% for ct in content_types %}
+        <label style="margin-right:14px"><input type="checkbox" name="content_types" value="{{ ct }}"
+          {% if ct in default_types %}checked{% endif %} /> {{ ct|replace('_',' ') }}</label>
+        {% endfor %}
+      </span>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <label>editor instructions (optional)<br>
+        <textarea name="instructions" rows="2" cols="70"
+          placeholder="Angle, tone, must-include facts, what to avoid…"></textarea></label>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <button type="submit">Create request</button>
+      {% if can_approve %}
+      <button type="submit" name="approve_now" value="1"
+        onclick="return confirm('Create AND approve — generation starts immediately. Continue?')">Create &amp; approve</button>
+      {% endif %}
+      {% if kill_switch %}<span class="badge live">kill switch ON — generation will be refused until it is lifted</span>{% endif %}
+    </div>
+  </form>
+</div>
+{% endif %}
+
+{% if pipelines %}
+<div class="panel">
+  <h3>Pipelines for this trend</h3>
+  <table>
+    <thead><tr><th>#</th><th>Status</th><th>Content</th><th>Approved by</th><th>Created</th></tr></thead>
+    <tbody>
+    {% for p in pipelines %}
+      <tr>
+        <td><a href="/pipelines/{{ p.id }}">#{{ p.id }}</a></td>
+        <td><span class="status-{{ p.status }}">{{ p.status|replace('_',' ') }}</span></td>
+        <td>{% for ct in p.content_types %}<span class="chip">{{ ct|replace('_',' ') }}</span> {% endfor %}</td>
+        <td class="muted">{{ p.approved_by or '—' }}</td>
+        <td class="muted">{{ p.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="panel">
+  <h3>Why this score <span class="hint muted">explainable factors — not a black box</span></h3>
+  {% if t.score_breakdown %}
+  <div class="mini-kpis">
+    {% for k, v in t.score_breakdown.items() %}
+    <div><div class="v" {% if v < 0 %}style="color:var(--bad)"{% endif %}>{{ '%+g'|format(v) }}</div>
+      <div class="l">{{ k|replace('_',' ') }}</div></div>
+    {% endfor %}
+  </div>
+  {% else %}<div class="muted">No breakdown recorded.</div>{% endif %}
+</div>
+
+<div class="panel">
+  <h3>Dossier
+    {% if t.dossier_url %}<span class="hint"><a href="{{ t.dossier_url }}">open full dossier ↗</a></span>{% endif %}</h3>
+  {% if t.dossier %}
+    {% if t.dossier.summary %}<p>{{ t.dossier.summary }}</p>{% endif %}
+    {% if t.dossier.angles %}
+      <h4 style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em">Suggested angles</h4>
+      <ul>{% for a in t.dossier.angles %}
+        <li><b>{{ a.title }}</b> <span class="chip">{{ a.content_type or 'article' }}</span><br>
+          <span class="muted">{{ a.rationale }}</span></li>
+      {% endfor %}</ul>
+    {% endif %}
+    {% if t.dossier.timeline %}
+      <h4 style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em">Timeline</h4>
+      <ul>{% for x in t.dossier.timeline %}<li class="muted">{{ x }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if t.dossier.risks %}
+      <h4 style="color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em">Risks</h4>
+      <ul>{% for x in t.dossier.risks %}<li class="muted">{{ x }}</li>{% endfor %}</ul>
+    {% endif %}
+  {% else %}
+    <div class="empty"><div class="e-icon">📄</div>No dossier yet — it is built automatically when the trend is proposed.</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h3>Fact gate <span class="hint muted">verified by the Research agent's web-search gate — generators may state only verified facts</span></h3>
+  {% if verified_facts %}
+    <h4 style="color:var(--good);font-size:11px;text-transform:uppercase;letter-spacing:.07em">Verified facts</h4>
+    <ul>{% for f in verified_facts %}<li>{{ f }} <span class="badge ok">verified</span></li>{% endfor %}</ul>
+  {% endif %}
+  {% if claims %}
+    <h4 style="color:var(--warn);font-size:11px;text-transform:uppercase;letter-spacing:.07em">Unverified claims</h4>
+    <ul>{% for c in claims %}<li class="muted">{{ c.statement }} <span class="badge dry">claim</span></li>{% endfor %}</ul>
+  {% endif %}
+  {% if not verified_facts and not claims %}
+    <div class="muted">No key facts extracted yet (dossier pending), or the fact-gate hasn't run.</div>
+  {% endif %}
+</div>
+
+<div class="panel">
+  <h3>Evidence <span class="hint muted">{{ t.evidence|length }} items across sources</span></h3>
+  {% if t.evidence %}
+  <table>
+    <thead><tr><th>Outlet</th><th>Title</th><th>Via</th><th>Published</th></tr></thead>
+    <tbody>
+    {% for e in t.evidence %}
+      <tr>
+        <td>{{ e.source or '—' }}</td>
+        <td>{% if e.url %}<a href="{{ e.url }}" target="_blank" rel="noopener">{{ e.title or e.url }}</a>{% else %}{{ e.title }}{% endif %}</td>
+        <td><span class="chip">{{ e.origin }}</span></td>
+        <td class="muted">{{ e.published_at[:16] if e.published_at else '' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<div class="muted">No evidence recorded.</div>{% endif %}
+</div>
+
+{% if can_approve and t.status in ('detected','dossier_building','proposed') %}
+<div class="panel">
+  <form method="post" action="/trends/{{ t.id }}/dismiss" class="inline">
+    <button type="submit" class="danger"
+      onclick="return confirm('Dismiss this trend? A matching cluster will not be re-proposed for a few days.')">Dismiss trend</button>
+  </form>
+</div>
+{% endif %}
+
+{% endblock %}
