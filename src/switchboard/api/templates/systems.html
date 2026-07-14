@@ -72,9 +72,11 @@
       <td><span class="badge {{ 'live' if 'action' in s.access or 'send' in s.access else 'muted' }}">{{ s.access }}</span></td>
       <td class="muted" style="font-size:13px">{{ s.uses }}</td>
       <td>
-        {% if not s.configured %}<span class="badge muted">not configured</span>
-        {% elif s.probed %}<span class="badge ok"><span class="pulse" style="width:7px;height:7px;margin-right:6px"></span>connected</span>
-        {% else %}<span class="badge accent">configured</span>{% if s.note %}<div class="muted" style="font-size:11px;margin-top:4px;word-break:break-all">{{ s.note }}</div>{% endif %}{% endif %}
+        {% if s.status == 'online' %}<span class="badge ok"><span class="pulse" style="width:7px;height:7px;margin-right:6px"></span>online</span>
+        {% elif s.status == 'offline' %}<span class="badge bad">offline</span>
+        {% elif s.status == 'configured' %}<span class="badge accent">configured</span>
+        {% else %}<span class="badge muted">not configured</span>{% endif %}
+        {% if s.note %}<div class="muted" style="font-size:11px;margin-top:4px;word-break:break-all">{{ s.note }}</div>{% endif %}
       </td>
     </tr>
     {% endfor %}

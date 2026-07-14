@@ -8,7 +8,9 @@ exposes spend-vs-caps, a memory browser, and the tool-call audit.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -661,6 +663,7 @@ async def set_role_route(request: Request, email: str = Form(...), role: str = F
 
 # The wrapped systems + external tools (PRD §4). `check` is (kind, key):
 #   cred  -> credentials.describe() presence   env -> a specific env var present
+#   service  -> a base URL that IS live-probed each load (online / offline)
 #   endpoint -> a configured base URL (shown, not probed)   always -> built-in
 SYSTEMS_META: list[dict[str, Any]] = [
     # Warehouse & data
@@ -676,13 +679,13 @@ SYSTEMS_META: list[dict[str, Any]] = [
     ("Trend sourcing", "Firecrawl", "research", "read", "Web search + page extraction for dossiers", ("cred", "firecrawl")),
     ("Trend sourcing", "NewsAPI", "research", "read", "Headline stream for the trend scout", ("cred", "newsapi")),
     # Editorial pipelines
-    ("Editorial pipelines", "Claude Albert", "production", "read + action", "Discover ideation + AI writer + outline reviewer", ("endpoint", "albert")),
-    ("Editorial pipelines", "Seona", "opportunity", "read + action", "SEO ideation + ranking-decay + Update Strategist", ("endpoint", "seona")),
-    ("Editorial pipelines", "HC Viral Hits", "production", "read + action", "Viral ideation + AI writer + Emaki CMS push", ("env", "HC_VIRAL_HITS_API_KEY")),
+    ("Editorial pipelines", "Claude Albert", "production", "read + action", "Discover ideation + AI writer + outline reviewer", ("service", "albert")),
+    ("Editorial pipelines", "Seona", "opportunity", "read + action", "SEO ideation + ranking-decay + Update Strategist", ("service", "seona")),
+    ("Editorial pipelines", "HC Viral Hits", "production", "read + action", "Viral ideation + AI writer + Emaki CMS push", ("service", "hc_viral_hits")),
     ("Editorial pipelines", "Asana", "production", "read + action", "Tasks + outline-approval workflow", ("cred", "asana")),
     ("Editorial pipelines", "Emaki CMS", "production", "action · gated", "Push unpublished article drafts (via HC-Viral)", ("env", "HC_VIRAL_HITS_API_KEY")),
     ("Editorial pipelines", "content-depth-auditor", "analytics", "feeder", "Content-depth findings → memory", ("env", "CONTENT_AUDITOR_URL")),
-    ("Editorial pipelines", "writers-dashboard", "analytics", "read", "Writer-performance metric logic (superseded)", ("endpoint", "writers_dashboard")),
+    ("Editorial pipelines", "writers-dashboard", "analytics", "read", "Writer-performance metric logic (superseded)", ("service", "writers_dashboard")),
     # Distribution
     ("Distribution", "daily-reporting-agent", "reporting", "read + send", "Per-brand editorial email digest", ("cred", "gmail")),
     ("Distribution", "newsletter-creator-auto", "reporting", "action · assemble", "CarBuzz newsletter draft (HTML)", ("env", "NEWSLETTER_API_URL")),
@@ -722,23 +725,83 @@ DECISIONS = [  # PRD §13 — what I defaulted vs. what's still open
 ]
 
 
+# --- live service health probing (Systems page) -----------------------------
+# `service` rows carry a base URL we actually ping on load, so the console can
+# report "online / offline" instead of merely "a URL is configured". Results are
+# cached briefly so refreshes stay snappy and we don't hammer the services.
+_PROBE_TTL_SEC = 20.0
+_PROBE_TIMEOUT_SEC = 1.5
+_probe_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def _probe_one(url: str) -> bool:
+    """True if the service answers *any* HTTP response (even 4xx/5xx) within the
+    timeout — that means it is up. Refused / timeout / DNS failure → offline."""
+    try:
+        import httpx
+    except ImportError:  # httpx is an adapter extra; degrade to "can't confirm"
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False) as client:
+            await client.get(url)
+        return True
+    except Exception:  # noqa: BLE001 — any transport error means unreachable
+        return False
+
+
+async def _probe_services(urls: dict[str, str]) -> dict[str, bool]:
+    """Probe ``{endpoint_key: url}`` concurrently, honouring a short TTL cache."""
+    now = time.monotonic()
+    result: dict[str, bool] = {}
+    todo: dict[str, str] = {}
+    for key, url in urls.items():
+        cached = _probe_cache.get(key)
+        if cached and (now - cached[0]) < _PROBE_TTL_SEC:
+            result[key] = cached[1]
+        else:
+            todo[key] = url
+    if todo:
+        probed = await asyncio.gather(*(_probe_one(u) for u in todo.values()))
+        for key, ok in zip(todo.keys(), probed):
+            _probe_cache[key] = (now, ok)
+            result[key] = ok
+    return result
+
+
 async def _systems_overview(ctx: RunContext) -> list[dict[str, Any]]:
     creds = ctx.creds
     present = creds.describe()
+    endpoints = ctx.settings.endpoints
+    # Live-probe every service row that actually has a URL, concurrently.
+    service_urls = {
+        key: endpoints[key]
+        for _c, _n, _o, _a, _u, (kind, key) in SYSTEMS_META
+        if kind == "service" and endpoints.get(key)
+    }
+    reachable = await _probe_services(service_urls) if service_urls else {}
+
     grouped: dict[str, list[dict[str, Any]]] = {}
     for category, name, owner, access, uses, check in SYSTEMS_META:
         kind, key = check
-        if kind == "cred":
-            configured, note = present.get(key, False), None
+        note: str | None = None
+        # status ∈ {online, offline, configured, missing}; the summary counts
+        # treat everything except "missing" as configured (offline = set up but
+        # down, so it still counts as configured — the badge shows it's offline).
+        if kind == "service":
+            note = endpoints.get(key)
+            status = "missing" if not note else ("online" if reachable.get(key) else "offline")
+        elif kind == "cred":
+            status = "configured" if present.get(key, False) else "missing"
         elif kind == "env":
-            configured, note = creds.has(key), None
+            status = "configured" if creds.has(key) else "missing"
         elif kind == "endpoint":
-            configured, note = True, ctx.settings.endpoints.get(key)
-        else:
-            configured, note = True, None
+            note = endpoints.get(key)
+            status = "configured" if note else "missing"
+        else:  # always
+            status = "configured"
         grouped.setdefault(category, []).append(
             {"name": name, "owner": owner, "access": access, "uses": uses,
-             "configured": configured, "note": note, "probed": kind != "endpoint"}
+             "status": status, "configured": status != "missing", "note": note}
         )
     return [{"category": c, "systems": s} for c, s in grouped.items()]
 
