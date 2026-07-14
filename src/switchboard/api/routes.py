@@ -498,8 +498,33 @@ templates.env.globals["type_color"] = lambda t: TYPE_COLORS.get(t, "#6f7887")
 # Service logo via logo.dev (needs a publishable token); "" → template shows a monogram.
 templates.env.globals["logo_url"] = lambda domain: (
     f"https://img.logo.dev/{domain}?token={get_settings().logo_dev_token}&size=64&format=png&retina=true"
-    if get_settings().logo_dev_token else ""
+    if get_settings().logo_dev_token and domain else ""
 )
+
+# OEM (automaker) → domain for logo.dev, keyed lowercase to match the detector's
+# lowercased OEM names (switchboard.trends.detector). Covers the detector brand list.
+_OEM_DOMAINS: dict[str, str] = {
+    "acura": "acura.com", "alfa romeo": "alfaromeo.com", "aston martin": "astonmartin.com",
+    "audi": "audi.com", "bentley": "bentleymotors.com", "bmw": "bmw.com", "bugatti": "bugatti.com",
+    "buick": "buick.com", "byd": "byd.com", "cadillac": "cadillac.com", "chevrolet": "chevrolet.com",
+    "chevy": "chevrolet.com", "chrysler": "chrysler.com", "citroen": "citroen.com", "dodge": "dodge.com",
+    "ducati": "ducati.com", "ferrari": "ferrari.com", "fiat": "fiat.com", "fisker": "fiskerinc.com",
+    "ford": "ford.com", "genesis": "genesis.com", "gm": "gm.com", "gmc": "gmc.com",
+    "harley-davidson": "harley-davidson.com", "honda": "honda.com", "hyundai": "hyundai.com",
+    "infiniti": "infinitiusa.com", "jaguar": "jaguar.com", "jeep": "jeep.com", "kia": "kia.com",
+    "koenigsegg": "koenigsegg.com", "lamborghini": "lamborghini.com", "land rover": "landrover.com",
+    "lexus": "lexus.com", "lincoln": "lincoln.com", "lotus": "lotuscars.com", "lucid": "lucidmotors.com",
+    "maserati": "maserati.com", "mazda": "mazda.com", "mclaren": "mclaren.com",
+    "mercedes": "mercedes-benz.com", "mini": "mini.com", "mitsubishi": "mitsubishicars.com",
+    "nio": "nio.com", "nissan": "nissanusa.com", "pagani": "pagani.com", "peugeot": "peugeot.com",
+    "polestar": "polestar.com", "porsche": "porsche.com", "ram": "ramtrucks.com", "renault": "renault.com",
+    "rimac": "rimac-automobili.com", "rivian": "rivian.com", "rolls-royce": "rolls-roycemotorcars.com",
+    "scout": "scoutmotors.com", "skoda": "skoda-auto.com", "stellantis": "stellantis.com",
+    "subaru": "subaru.com", "suzuki": "suzuki.com", "tesla": "tesla.com", "toyota": "toyota.com",
+    "vinfast": "vinfastauto.com", "volkswagen": "vw.com", "volvo": "volvocars.com",
+    "xiaomi": "xiaomi.com", "yamaha": "yamaha-motor.com",
+}
+templates.env.globals["oem_domain"] = lambda name: _OEM_DOMAINS.get((name or "").strip().lower(), "")
 
 FEEDER_META = [
     {"key": "decay_scan", "display": "Ranking-decay scan",
