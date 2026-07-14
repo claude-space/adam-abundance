@@ -2,6 +2,19 @@
 {% block title %}Agents — Switchboard{% endblock %}
 {% block body %}
 
+{% macro agent_icon(key) %}
+{%- set paths = {
+  'research': '<circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+  'opportunity': '<path d="M9 18h6"/><path d="M10 22h4"/><path d="M15.1 14c.2-1 .6-1.7 1.4-2.5A4.6 4.6 0 0 0 18 8 6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.8.8 1.2 1.5 1.4 2.5"/>',
+  'production': '<path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-6 4V8l-6 4V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2z"/>',
+  'analytics': '<path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/>',
+  'reporting': '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 17v-3"/><path d="M12 17v-6"/><path d="M16 17v-2"/>',
+  'paid_media': '<path d="m3 11 18-5v12L3 14z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/>',
+  'orchestrator': '<circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/>'
+} -%}
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px">{{ paths.get(key, '<circle cx="12" cy="12" r="9"/>')|safe }}</svg>
+{%- endmacro %}
+
 {% set ns = namespace(entries=0, calls=0, actions=0, ro=0, active=0) %}
 {% for a in agents %}
   {% set ns.entries = ns.entries + a.entries %}
@@ -65,28 +78,48 @@
   <p class="flowlbl" style="margin:4px 0 0">Scheduled feeders (ranking-decay · content-audit) drop typed entries straight into memory — they are not agents.</p>
 </div>
 
-<div class="grid rise rise-3" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin:16px 0">
+<div class="sect rise rise-3" style="margin:20px 0 4px"><span class="rule-gold"></span>Fleet activity <span class="hint">utilization vs the busiest agent</span></div>
+{% set maxe = (agents|map(attribute='entries')|max) or 1 %}
+<div class="grid rise rise-3" style="grid-template-columns:repeat(auto-fit,minmax(330px,1fr));margin:0 0 16px">
   {% for a in agents %}
-  <a href="/agents/{{ a.key }}" class="card agent-card rise" style="--c:{{ a.color }};animation-delay:{{ '%.2f'|format(0.12 + loop.index0 * 0.05) }}s">
-    <div class="ac-head">
-      <span class="ac-mono" style="background:{{ a.color }}">{{ a.display[0] }}</span>
-      <div>
+  {% set util = ((a.entries / maxe * 100)|round|int) if maxe else 0 %}
+  {% set live = a.last_active or a.entries > 20 %}
+  <a href="/agents/{{ a.key }}" class="card card-hover rise" style="--c:{{ a.color }};border-top:2px solid {{ a.color }};animation-delay:{{ '%.2f'|format(0.12 + loop.index0 * 0.05) }}s;display:flex;flex-direction:column;gap:13px;color:inherit;{{ 'opacity:.72' if (not live and not a.errors) else '' }}">
+    <div style="display:flex;align-items:flex-start;gap:12px">
+      <span class="icon-tile" style="--c:{{ a.color }};width:40px;height:40px;border-radius:12px">{{ agent_icon(a.key) }}</span>
+      <div style="flex:1;min-width:0">
         <div class="ac-name">{{ a.display }}</div>
         <div class="ac-tag">{{ a.tagline }}</div>
       </div>
       <span class="ac-badge">{% if a.read_only %}read-only{% else %}{{ a.actions|length }} action{{ '' if a.actions|length == 1 else 's' }}{% endif %}</span>
     </div>
-    <p class="ac-domain">{{ a.domain }}</p>
-    <div class="ac-tools">
+
+    <div style="display:flex;align-items:center;gap:7px;font-size:12px">
+      <span class="adot" style="margin:0;background:{{ 'var(--bad)' if a.errors else ('var(--good)' if live else 'var(--muted)') }}"></span>
+      <span style="color:{{ 'var(--bad)' if a.errors else ('var(--good)' if live else 'var(--muted)') }};font-weight:600">{% if a.errors %}{{ a.errors }} error{{ '' if a.errors == 1 else 's' }}{% elif live %}running{% else %}idle{% endif %}</span>
+    </div>
+
+    <p class="ac-domain" style="margin:0;min-height:auto">{{ a.domain }}</p>
+
+    <div>
+      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+        <span class="kpi-label">Utilization</span>
+        <span class="mono" style="font-size:11px;font-weight:700;color:var(--ink-2)">{{ util }}%</span>
+      </div>
+      <span class="bar" style="height:4px"><span style="width:{{ util }}%;background:{{ 'var(--bad)' if a.errors else a.color }}"></span></span>
+    </div>
+
+    <div class="ac-tools" style="margin:0">
       {% for t in a.owns[:4] %}<span class="chip">{{ t }}</span>{% endfor %}
       {% for t in a.actions[:3] %}<span class="chip act">⚡ {{ t }}</span>{% endfor %}
       {% set extra = a.owns|length - 4 %}{% if extra > 0 %}<span class="chip">+{{ extra }}</span>{% endif %}
       {% if not a.owns and not a.actions %}<span class="chip">memory only</span>{% endif %}
     </div>
-    <div class="ac-stats">
-      <span><b>{{ a.entries }}</b> entries</span>
-      <span><b>{{ a.calls }}</b> tool calls</span>
-      <span style="margin-left:auto">{% if a.last_active %}<span class="pulse" style="margin-right:7px"></span>{{ a.last_active }}{% else %}idle{% endif %}</span>
+
+    <div style="display:flex;gap:24px;border-top:1px solid var(--line);padding-top:12px;margin-top:auto">
+      <div><div class="kpi-label">Entries</div><div class="mono" style="font-weight:800;font-size:16px">{{ a.entries }}</div></div>
+      <div><div class="kpi-label">Calls</div><div class="mono" style="font-weight:800;font-size:16px">{{ a.calls }}</div></div>
+      <div><div class="kpi-label">Errors</div><div class="mono" style="font-weight:800;font-size:16px;color:{{ 'var(--bad)' if a.errors else 'var(--muted)' }}">{{ a.errors }}</div></div>
     </div>
   </a>
   {% endfor %}

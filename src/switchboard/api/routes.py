@@ -547,6 +547,11 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
         select(ToolCallLog.agent, func.count(), func.max(ToolCallLog.created_at)).group_by(ToolCallLog.agent)
     )).all()
     calls = {a: (int(c), ts) for a, c, ts in call_rows}
+    err_rows = (await ctx.session.execute(
+        select(ToolCallLog.agent, func.count()).where(ToolCallLog.ok.is_(False))
+        .group_by(ToolCallLog.agent)
+    )).all()
+    errors = {a: int(c) for a, c in err_rows}
     out = []
     for m in AGENT_META:
         k = m["key"]
@@ -555,7 +560,7 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
             actions = ["notify", *actions]
         c, last = calls.get(k, (0, None))
         out.append({**m, "owns": owned_tool_names(k), "actions": actions, "read_only": not actions,
-                    "entries": mem.get(k, 0), "calls": c,
+                    "entries": mem.get(k, 0), "calls": c, "errors": errors.get(k, 0),
                     "last_active": last.strftime("%m-%d %H:%M") if last else None})
     return out
 
