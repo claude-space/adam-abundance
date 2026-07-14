@@ -40,3 +40,11 @@ class HCViralClient:
             params["status"] = status
         data = await self._get("/api/cms/drafts", params)
         return data if isinstance(data, list) else data.get("drafts", [])
+
+    async def list_topics(self, brand: str) -> list[dict[str, Any]]:
+        """Every topic HC-Viral is tracking for a brand (any status), used for the
+        cross-monitor corroboration check. Targets the machine topics surface
+        (`/api/cms/topics`); callers should fall back to ``list_drafts`` when it
+        isn't exposed yet (this raises on 404)."""
+        data = await self._get("/api/cms/topics", {"brand": brand})
+        return data if isinstance(data, list) else data.get("topics", data.get("drafts", []))

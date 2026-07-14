@@ -92,6 +92,16 @@ Switchboard stores the JSON as a social draft.
 ```json
 { "drafts": [ { "topic_id": 426, "title": "…", "content_type": "…", "word_count": 900 } ] }
 ```
+**Optional add for cross-monitor corroboration:** a topics endpoint listing every topic
+HC-Viral is tracking for a brand (any status), on the key-authed surface — so Switchboard can
+boost a competitor-trend when HC-Viral independently landed on the same topic:
+`GET /api/cms/topics/?brand=<brand>` →
+```json
+{ "topics": [ { "topic_id": 426, "title": "…", "status": "drafting" } ] }
+```
+Until this exists, Switchboard falls back to the **ready-draft queue** for corroboration
+(narrower — it only sees finished drafts, not in-progress topics).
+
 **Optional add for cost routing:** a usage endpoint that exposes `compute_cost_cents`, e.g.
 `GET /api/cms/usage/?brand=<brand>` → `{ "compute_cost_cents": 1234 }`. Switchboard already
 converts cents → the governor's `llm_micros` unit; with this it can absorb HC-Viral spend

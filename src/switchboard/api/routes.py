@@ -716,6 +716,10 @@ CONSOLIDATION = [  # PRD §15 — surfaced, not assumed; annotated as decisions 
     "Two cost-tracking schemes (Albert cost_micros vs HC-Viral compute_cost_cents). → Decided: route "
     "both into the governor's spend_ledger (unit already unified in costs.py); pending a cost/usage "
     "endpoint from Albert + HC-Viral to read from.",
+    "Two per-brand trend monitors (Switchboard Trend Scout vs HC Viral Hits). → Decided: run both; a "
+    "competitor-trend gets a cross-monitor bonus (+15) when HC-Viral independently landed on the same "
+    "topic. Corroboration reads HC-Viral's ready drafts today; widens to all topics once it exposes "
+    "/api/cms/topics.",
 ]
 
 DECISIONS = [  # PRD §13 — what I defaulted vs. what's still open

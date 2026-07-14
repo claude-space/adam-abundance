@@ -75,12 +75,14 @@ class TrendScout:
         items = await self._signals_from_memory()
         clusters = detector.cluster_signals(items)
         our_titles = await self._our_titles()
+        hc_titles = await self._hc_viral_titles()
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
             "enabled": True, "signals": len(items), "clusters": len(clusters),
             "sources_pulled": pulled, "expired": expired,
             "new_trends": 0, "updated_trends": 0, "proposed": 0, "suppressed": 0,
+            "corroborated": 0,
         }
 
         proposals_left = _MAX_NEW_PROPOSALS_PER_SCAN
@@ -88,15 +90,19 @@ class TrendScout:
             if len(cluster.sources) < cfg.min_sources:
                 continue
             covered = detector.covered_by_titles(cluster, our_titles) if our_titles else None
+            corroborated = bool(hc_titles) and detector.corroborated_by_titles(cluster, hc_titles)
+            if corroborated:
+                summary["corroborated"] += 1
             score, breakdown = detector.score_cluster(
-                cluster, watchlist=cfg.watchlist, covered=covered)
+                cluster, watchlist=cfg.watchlist, covered=covered, corroborated=corroborated)
             trend, created = await self.trends.upsert(
                 brand=brand, cluster_key=cluster.cluster_key(), headline=cluster.headline,
                 score=score, score_breakdown=breakdown,
                 velocity=detector.cluster_velocity(cluster),
                 source_count=len(cluster.sources), signal_count=len(cluster.items),
                 covered_by_us=covered,
-                entities={"oems": list(cluster.oem_anchor)},
+                entities={"oems": list(cluster.oem_anchor),
+                          "corroborated_by": ["hc_viral"] if corroborated else []},
                 evidence=[_evidence(i) for i in cluster.items],
                 ttl_hours=cfg.ttl_hours, dedup_days=cfg.dedup_days,
             )
@@ -168,6 +174,31 @@ class TrendScout:
                 titles.extend(getattr(e, "title", "") for e in parsed.entries[:40])
             except Exception as exc:  # noqa: BLE001
                 log.info("[scout] own feed %s failed: %s", key, exc)
+        return [t for t in titles if t]
+
+    async def _hc_viral_titles(self) -> list[str]:
+        """Titles HC Viral Hits has independently landed on — the cross-monitor
+        corroboration signal. Prefers its topics surface (all statuses); falls
+        back to the ready-draft queue when that endpoint isn't exposed yet.
+        Soft-fails to [] — corroboration is a bonus, never a hard dependency."""
+        from ..adapters.clients.hcviral import HCViralClient
+
+        base = self.ctx.settings.endpoints.get("hc_viral_hits")
+        key = self.ctx.creds.resolve("HC_VIRAL_HITS_API_KEY")
+        if not (base and key):
+            return []
+        client = HCViralClient(base, key)
+        titles: list[str] = []
+        for brand in ("hotcars", "topspeed"):  # HC-Viral's served brands
+            rows: list[dict[str, Any]] = []
+            try:
+                rows = await client.list_topics(brand)
+            except Exception:  # noqa: BLE001 — topics surface absent → ready drafts
+                try:
+                    rows = await client.list_drafts(brand, status="ready")
+                except Exception as exc:  # noqa: BLE001 — soft-fail
+                    log.info("[scout] hc-viral corroboration fetch failed (%s): %s", brand, exc)
+            titles.extend(r.get("title", "") for r in rows if r.get("title"))
         return [t for t in titles if t]
 
     async def _propose(self, trend: Trend) -> bool:

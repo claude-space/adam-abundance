@@ -159,23 +159,40 @@ def cluster_signals(items: Iterable[dict[str, Any]], *, jaccard_threshold: float
 
 # -- coverage-gap --------------------------------------------------------------
 
-def covered_by_titles(cluster: Cluster, our_titles: Iterable[str]) -> bool:
-    """Have we already published a matching story? ≥3 shared significant tokens
-    or strong Jaccard against any of our recent titles."""
-    for title in our_titles:
-        ours = tokens(title)
-        if len(ours & cluster.token_set) >= 3 or _jaccard(ours, cluster.token_set) >= 0.5:
+def _title_match(cluster: Cluster, titles: Iterable[str]) -> bool:
+    """True when any title fuzzily matches the cluster: ≥3 shared significant
+    tokens or Jaccard ≥ 0.5 against the cluster's token set."""
+    for title in titles:
+        t = tokens(title)
+        if len(t & cluster.token_set) >= 3 or _jaccard(t, cluster.token_set) >= 0.5:
             return True
     return False
 
 
+def covered_by_titles(cluster: Cluster, our_titles: Iterable[str]) -> bool:
+    """Have we already published a matching story? (coverage-gap check)"""
+    return _title_match(cluster, our_titles)
+
+
+def corroborated_by_titles(cluster: Cluster, titles: Iterable[str]) -> bool:
+    """Did an independent monitor (e.g. HC Viral Hits) land on the same topic?
+    Same fuzzy match as the coverage check — drives the cross-monitor boost."""
+    return _title_match(cluster, titles)
+
+
 # -- scoring -------------------------------------------------------------------
+
+# Bonus when an independent monitor (HC Viral Hits) landed on the same topic —
+# two systems agreeing is a strong signal, so it counts like a watchlist hit.
+_CROSS_MONITOR_BONUS = 15.0
+
 
 def score_cluster(
     cluster: Cluster,
     *,
     watchlist: Iterable[str] = (),
     covered: bool | None = None,
+    corroborated: bool = False,
     now: datetime | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score 0–100 with an explainable breakdown (surfaced in the console)."""
@@ -204,6 +221,11 @@ def score_cluster(
 
     is_breaking = bool(_BREAKING_RE.search(text)) and not _EVERGREEN_RE.search(text)
     breakdown["breaking"] = 12.0 if is_breaking else 0.0
+
+    # Cross-monitor corroboration: HC Viral Hits independently landed on the same
+    # topic. Two monitors agreeing is a strong signal → bonus points.
+    if corroborated:
+        breakdown["cross_monitor"] = _CROSS_MONITOR_BONUS
 
     if times and (now - times[-1]) > timedelta(hours=48):
         breakdown["stale_penalty"] = -10.0
