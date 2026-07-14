@@ -704,11 +704,18 @@ SYSTEMS_META: list[dict[str, Any]] = [
     ("Substrate & platform", "PostgreSQL", "orchestrator", "memory", "Shared-memory coordination substrate", ("cred", "database_url")),
 ]
 
-CONSOLIDATION = [  # PRD §15 — surfaced, not assumed
-    "Two BigQuery article tables (ODS vs consum) feed different systems for the same brands — pick a canonical source for Analytics or map between them.",
-    "Two ideation + AI-writer pipelines (Claude Albert / HC Viral Hits) draft in parallel with overlapping brands — memory can de-dup topic angles across both.",
-    "Two performance-digest paths (writers-dashboard Slack vs daily-reporting email) compute overlapping per-brand performance daily — share one metric layer.",
-    "Two cost-tracking schemes (Albert cost_micros vs HC-Viral compute_cost_cents) — the governor's spend_ledger should absorb both, not add a third.",
+CONSOLIDATION = [  # PRD §15 — surfaced, not assumed; annotated as decisions land
+    "Two BigQuery article tables (ODS vs consum) feed different systems for the same brands. "
+    "→ Resolved: consum (pubinsights_consum_data) = published performance, ODS (pubinsights_ods_data) "
+    "= Discover; confirmed with Artem — kept separate by purpose.",
+    "Two ideation + AI-writer pipelines (Claude Albert / HC Viral Hits) draft in parallel with "
+    "overlapping brands. → Resolved: de-dup enabled in both Albert and HC Viral Hits.",
+    "Two performance-digest paths (writers-dashboard vs daily-reporting) compute overlapping per-brand "
+    "performance. → Resolved: writers-dashboard tracks writer performance only; daily-reporting-agent "
+    "pulls the top live articles.",
+    "Two cost-tracking schemes (Albert cost_micros vs HC-Viral compute_cost_cents). → Decided: route "
+    "both into the governor's spend_ledger (unit already unified in costs.py); pending a cost/usage "
+    "endpoint from Albert + HC-Viral to read from.",
 ]
 
 DECISIONS = [  # PRD §13 — what I defaulted vs. what's still open

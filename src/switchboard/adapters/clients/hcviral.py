@@ -27,7 +27,9 @@ class HCViralClient:
             import httpx  # type: ignore
         except ImportError as exc:  # pragma: no cover
             raise AdapterUnavailable("httpx not installed") from exc
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        # ShellAgent 308-redirects API paths to add a trailing slash; follow it
+        # (same-origin, so the X-API-Key header is preserved).
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(f"{self._base}{path}", params=params, headers=self._headers())
             resp.raise_for_status()
             return resp.json()
