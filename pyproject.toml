@@ -14,6 +14,7 @@ dependencies = [
     # Core web + orchestration plane
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",  # FastAPI Form()/UploadFile deps, e.g. POST /cycle
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "python-dotenv>=1.0",
