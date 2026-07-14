@@ -55,7 +55,10 @@ from .trend_sources import (
     FirecrawlTrendAdapter,
     NewsApiTrendAdapter,
     PerplexityTrendAdapter,
+    SemrushTrendAdapter,
     TavilyTrendAdapter,
+    XTrendAdapter,
+    YouTubeTrendAdapter,
 )
 
 # agent name -> adapter classes it owns
@@ -69,6 +72,9 @@ REGISTRY: dict[str, list[Type[BaseAdapter]]] = {
         NewsApiTrendAdapter,
         FirecrawlTrendAdapter,
         PerplexityTrendAdapter,
+        YouTubeTrendAdapter,
+        XTrendAdapter,
+        SemrushTrendAdapter,
     ],
     "opportunity": [
         AhrefsAdapter,

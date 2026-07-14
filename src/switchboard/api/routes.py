@@ -203,6 +203,7 @@ async def home(request: Request):
         fleet = await _agents_overview(ctx)
         spend = await _spend_snapshot(ctx)
         deltas = await _spend_deltas(ctx, spend)
+        resources = await _resource_usage(ctx, spend, deltas)
     now = datetime.now()
     greeting = "Good morning" if now.hour < 12 else ("Good afternoon" if now.hour < 18 else "Good evening")
     first = (user.get("name") or user.get("email", "")).split("@")[0].split(".")[0].title()
@@ -210,19 +211,6 @@ async def home(request: Request):
     fleet_max = max((a["entries"] for a in fleet), default=1) or 1
     caps = settings.caps
     _llm_cap, _bq_cap, _ah_cap = caps.per_day("llm_micros"), caps.per_day("bq_bytes"), caps.per_day("ahrefs_units")
-    # Resource-usage list (Lovable dashboard): metered resources today, with a
-    # "was X yesterday" baseline + real delta. Only the three the governor meters.
-    resources = [
-        {"label": "LLM spend", "mono": "AI", "c": "var(--accent-2)",
-         "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
-         "prev": f"${deltas['llm_micros']['prev']/1e6:.2f}", "pct": deltas["llm_micros"]["pct"]},
-        {"label": "BigQuery", "mono": "BQ", "c": "var(--good)",
-         "val": f"{spend['bq_bytes']['spent_today']/1048576:.0f} MB",
-         "prev": f"{deltas['bq_bytes']['prev']/1048576:.0f} MB", "pct": deltas["bq_bytes"]["pct"]},
-        {"label": "Ahrefs units", "mono": "Ah", "c": "var(--warn)",
-         "val": f"{spend['ahrefs_units']['spent_today']}",
-         "prev": f"{deltas['ahrefs_units']['prev']}", "pct": deltas["ahrefs_units"]["pct"]},
-    ]
     gauges = [
         {"label": "LLM spend", "gc": "#5b9dff", "pct": spend["llm_micros"]["pct"] or 0,
          "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
@@ -507,6 +495,11 @@ TYPE_COLORS = {"metric": "#5b9dff", "flag": "#d6a021", "fact": "#3fb950", "claim
 # Make the color lookups available to every template.
 templates.env.globals["agent_color"] = lambda k: AGENT_COLORS.get(k, "#6f7887")
 templates.env.globals["type_color"] = lambda t: TYPE_COLORS.get(t, "#6f7887")
+# Service logo via logo.dev (needs a publishable token); "" → template shows a monogram.
+templates.env.globals["logo_url"] = lambda domain: (
+    f"https://img.logo.dev/{domain}?token={get_settings().logo_dev_token}&size=64&format=png&retina=true"
+    if get_settings().logo_dev_token else ""
+)
 
 FEEDER_META = [
     {"key": "decay_scan", "display": "Ranking-decay scan",
@@ -1355,6 +1348,56 @@ async def _spend_deltas(ctx: RunContext, spend: dict[str, Any]) -> dict[str, Any
         y = prev.get(metric, 0)
         out[metric] = {"prev": y, "pct": round(100 * (today - y) / y, 1) if y else None}
     return out
+
+
+# Trend-source APIs surfaced on the dashboard, keyed by the exact tool_call_log
+# names each adapter/dossier step logs (BaseAdapter.observe logs tool=<adapter
+# name>; the dossier logs tavily_deep_search). Firecrawl/NewsAPI/Perplexity are
+# still called + audited, just not shown in this curated 7-row panel.
+_API_RESOURCES = [
+    ("Tavily", "tavily.com", ["tavily_trends", "tavily_deep_search"]),
+    ("YouTube", "youtube.com", ["youtube_trends"]),
+    ("X", "x.com", ["x_trends"]),
+    ("Semrush", "semrush.com", ["semrush_trends"]),
+]
+
+
+async def _resource_usage(ctx: RunContext, spend: dict[str, Any],
+                          deltas: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resource-usage rows for the dashboard — all backed by real tracking:
+    LLM/BigQuery/Ahrefs from the spend ledger, and the trend-source APIs counted
+    from the tool_call_log audit trail (today vs yesterday). Each carries a
+    `domain` used to render the service's real logo."""
+    from datetime import datetime as _dt, timedelta, timezone as _tz
+
+    rows: list[dict[str, Any]] = [
+        {"label": "LLM spend", "domain": "anthropic.com",
+         "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
+         "prev": f"${deltas['llm_micros']['prev']/1e6:.2f}", "pct": deltas["llm_micros"]["pct"]},
+        {"label": "BigQuery", "domain": "cloud.google.com",
+         "val": f"{spend['bq_bytes']['spent_today']/1048576:.0f} MB",
+         "prev": f"{deltas['bq_bytes']['prev']/1048576:.0f} MB", "pct": deltas["bq_bytes"]["pct"]},
+        {"label": "Ahrefs units", "domain": "ahrefs.com",
+         "val": f"{spend['ahrefs_units']['spent_today']:,}",
+         "prev": f"{deltas['ahrefs_units']['prev']:,}", "pct": deltas["ahrefs_units"]["pct"]},
+    ]
+    now = _dt.now(_tz.utc)
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yest0 = today0 - timedelta(days=1)
+    for label, domain, tools in _API_RESOURCES:
+        today_n = int((await ctx.session.execute(
+            select(func.count()).select_from(ToolCallLog)
+            .where(ToolCallLog.tool.in_(tools), ToolCallLog.created_at >= today0)
+        )).scalar_one())
+        prev_n = int((await ctx.session.execute(
+            select(func.count()).select_from(ToolCallLog)
+            .where(ToolCallLog.tool.in_(tools),
+                   ToolCallLog.created_at >= yest0, ToolCallLog.created_at < today0)
+        )).scalar_one())
+        rows.append({"label": f"{label} calls", "domain": domain,
+                     "val": f"{today_n:,}", "prev": f"{prev_n:,}",
+                     "pct": round(100 * (today_n - prev_n) / prev_n, 1) if prev_n else None})
+    return rows
 
 
 async def _recent_audit(ctx: RunContext, limit: int) -> list[dict[str, Any]]:

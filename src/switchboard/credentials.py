@@ -201,6 +201,15 @@ class Credentials:
     def newsapi_key(self) -> str | None:
         return self.resolve("NEWSAPI_API_KEY") or self.resolve("NEWS_API_KEY")
 
+    def youtube_key(self) -> str | None:
+        return self.resolve("YOUTUBE_API_KEY")
+
+    def x_bearer(self) -> str | None:
+        return self.resolve("X_BEARER_TOKEN")
+
+    def semrush_key(self) -> str | None:
+        return self.resolve("SEMRUSH_API_KEY")
+
     def trend_agent(self, content_type: str) -> tuple[str | None, str | None]:
         """Generic ShellAgent workflow generator for a content type:
         (base_url, bearer_token) from TREND_AGENT_<TYPE>_URL / _TOKEN."""
@@ -319,6 +328,9 @@ class Credentials:
             "perplexity": "PERPLEXITY_API_KEY",
             "firecrawl": "FIRECRAWL_API_KEY",
             "newsapi": ("NEWSAPI_API_KEY", "NEWS_API_KEY"),  # match newsapi_key()'s fallback
+            "youtube": "YOUTUBE_API_KEY",
+            "x": "X_BEARER_TOKEN",
+            "semrush": "SEMRUSH_API_KEY",
             "google_sa_inline": "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON",
             "google_sa_file": "GOOGLE_APPLICATION_CREDENTIALS",
             "gmail": "GMAIL_REFRESH_TOKEN",

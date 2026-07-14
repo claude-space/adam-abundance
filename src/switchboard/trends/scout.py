@@ -19,7 +19,10 @@ from ..adapters.trend_sources import (
     FirecrawlTrendAdapter,
     NewsApiTrendAdapter,
     PerplexityTrendAdapter,
+    SemrushTrendAdapter,
     TavilyTrendAdapter,
+    XTrendAdapter,
+    YouTubeTrendAdapter,
 )
 from ..context import RunContext
 from ..db.enums import PORTFOLIO, EntryType, TrendStatus
@@ -35,7 +38,8 @@ from .repo import PipelineRepo, TrendRepo
 log = get_logger("trends.scout")
 
 _SOURCE_ADAPTERS = (TavilyTrendAdapter, NewsApiTrendAdapter, FirecrawlTrendAdapter,
-                    PerplexityTrendAdapter, CompetitorNewsAdapter)
+                    PerplexityTrendAdapter, YouTubeTrendAdapter, XTrendAdapter,
+                    SemrushTrendAdapter, CompetitorNewsAdapter)
 _MAX_NEW_PROPOSALS_PER_SCAN = 3
 
 
