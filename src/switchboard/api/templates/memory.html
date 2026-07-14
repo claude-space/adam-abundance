@@ -2,6 +2,25 @@
 {% block title %}Memory — Switchboard{% endblock %}
 {% block body %}
 
+<style>
+  .jtoggle{ background:transparent; border:1px solid var(--line-2); color:var(--ink-2);
+    border-radius:7px; padding:3px 13px; font-size:12px; cursor:pointer; transition:border-color .15s,color .15s; }
+  .jtoggle:hover, .jtoggle[aria-expanded="true"]{ border-color:color-mix(in srgb,var(--accent) 50%,transparent); color:var(--accent); }
+  .payrow > td{ padding:2px 0 16px; border:0; }
+  .jsonwrap{ background:rgba(0,0,0,.38); border:1px solid var(--line-2); border-radius:var(--radius-lg);
+    box-shadow:0 8px 24px rgba(0,0,0,.35); overflow:hidden; max-width:960px; }
+  .jsonhead{ display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px;
+    letter-spacing:.05em; color:var(--muted); text-transform:uppercase; padding:9px 15px;
+    border-bottom:1px solid var(--line); background:rgba(255,255,255,.02); }
+  .jsonbox{ margin:0; padding:14px 18px; font-family:var(--font-mono); font-size:12.5px; line-height:1.7;
+    color:var(--ink-2); max-height:460px; overflow:auto; white-space:pre-wrap; word-break:break-word; tab-size:2; }
+  .jsonbox .j-key{ color:var(--accent); }
+  .jsonbox .j-str{ color:#8fd3b0; }
+  .jsonbox .j-num{ color:#7aa2f7; }
+  .jsonbox .j-bool{ color:#c98bdb; }
+  .jsonbox .j-null{ color:var(--muted); }
+</style>
+
 <div class="phero rise" style="--ph:#c9a84c">
   <span class="pill-gold">Shared Memory</span>
   <h2 style="margin-top:12px">
@@ -173,8 +192,19 @@
         </td>
         <td class="status-{{ e.status }}">{{ e.status }}</td>
         <td class="muted" style="font-size:12px;white-space:nowrap">{{ e.created_at }}</td>
-        <td><details><summary class="muted">view</summary><pre style="max-width:420px;max-height:260px;overflow:auto">{{ e.payload|tojson(indent=2) }}</pre></details></td>
+        <td>{% if e.payload %}<button type="button" class="jtoggle" data-id="{{ e.id }}" aria-expanded="false">view</button>{% else %}<span class="muted">—</span>{% endif %}</td>
       </tr>
+      {% if e.payload %}
+      <tr class="payrow" id="pay-{{ e.id }}" hidden>
+        <td colspan="10">
+          <div class="jsonwrap">
+            <div class="jsonhead">payload · entry #{{ e.id }} · {{ e.kind or e.type }}</div>
+            <pre class="jsonbox"></pre>
+            <script type="application/json" class="jsonsrc">{{ e.payload|tojson }}</script>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
       {% else %}
       <tr><td colspan="10">
         <div class="empty">
@@ -187,5 +217,39 @@
     </table>
   </div>
 </div>
+
+<script>
+(function(){
+  function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function hlJson(obj){
+    var s = esc(JSON.stringify(obj, null, 2));
+    return s.replace(/("(\\u[a-fA-F0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+\-]?\d+)?)/g,
+      function(m){
+        var cls = 'j-num';
+        if(/^"/.test(m)) cls = /:$/.test(m) ? 'j-key' : 'j-str';
+        else if(/true|false/.test(m)) cls = 'j-bool';
+        else if(/null/.test(m)) cls = 'j-null';
+        return '<span class="'+cls+'">'+m+'</span>';
+      });
+  }
+  document.querySelectorAll('.jtoggle').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var row = document.getElementById('pay-'+btn.dataset.id);
+      if(!row) return;
+      if(!row.hasAttribute('hidden')){
+        row.setAttribute('hidden',''); btn.setAttribute('aria-expanded','false'); btn.textContent='view'; return;
+      }
+      var pre = row.querySelector('.jsonbox');
+      if(!pre.dataset.filled){
+        var raw = row.querySelector('.jsonsrc').textContent;
+        try { pre.innerHTML = hlJson(JSON.parse(raw)); }
+        catch(e){ pre.textContent = raw; }
+        pre.dataset.filled = '1';
+      }
+      row.removeAttribute('hidden'); btn.setAttribute('aria-expanded','true'); btn.textContent='hide';
+    });
+  });
+})();
+</script>
 
 {% endblock %}
