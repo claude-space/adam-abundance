@@ -20,7 +20,7 @@ from .lifecycle import (
     PIPELINE_OPEN_STATUSES,
     TREND_OPEN_STATUSES,
     LifecycleError,
-    require_open_pipeline,
+    require_recoverable_pipeline,
     validate_actor,
     validate_content_types,
     validate_job_transition,
@@ -427,7 +427,7 @@ class PipelineRepo:
         if job is None:
             raise LifecycleError(f"content_job {job_id} not found")
         if job.pipeline is not None:
-            require_open_pipeline(job.pipeline.status)  # closed pipelines stay closed
+            require_recoverable_pipeline(job.pipeline.status)  # closed pipelines stay closed
         status = ContentJobStatus.APPROVED.value if approve else ContentJobStatus.REJECTED.value
         job = await self.mark_job(job_id, status, reviewed_by=actor, reviewed_at=_now())
         if job.pipeline is not None:
@@ -444,7 +444,7 @@ class PipelineRepo:
         if job is None:
             raise LifecycleError(f"content_job {job_id} not found")
         if job.pipeline is not None:
-            require_open_pipeline(job.pipeline.status)  # closed pipelines stay closed
+            require_recoverable_pipeline(job.pipeline.status)  # closed pipelines stay closed
         validate_job_transition(job.status, ContentJobStatus.QUEUED.value)
         job.history = (job.history or []) + [{
             "attempt": job.attempt, "instructions": job.instructions,

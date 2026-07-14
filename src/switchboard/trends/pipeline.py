@@ -28,7 +28,7 @@ from .generators import generate
 from .lifecycle import (
     TREND_OPEN_STATUSES,
     LifecycleError,
-    require_open_pipeline,
+    require_recoverable_pipeline,
     validate_actor,
 )
 from .repo import PipelineRepo, TrendRepo
@@ -229,7 +229,7 @@ async def publish_job(ctx: RunContext, job_id: int, actor: str) -> ContentJob:
     job = await repo.get_job(job_id)
     if job is None or job.pipeline is None:
         raise LifecycleError(f"content_job {job_id} not found")
-    require_open_pipeline(job.pipeline.status)  # closed/declined pipelines stay closed
+    require_recoverable_pipeline(job.pipeline.status)  # closed/declined pipelines stay closed
     if job.status != ContentJobStatus.APPROVED.value:
         raise LifecycleError("approve the preview before publishing")
     pipeline = job.pipeline

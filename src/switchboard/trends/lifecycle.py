@@ -50,6 +50,11 @@ _TREND_TRANSITIONS: dict[str, set[str]] = {
 
 PIPELINE_OPEN_STATUSES = ("pending_approval", "approved", "generating", "previews_ready",
                           "partially_published")
+# Genuinely dead ends — vs. PIPELINE_OPEN_STATUSES, which is the narrower
+# "actively pending/generating" set used for cap-counting. 'failed' is
+# deliberately NOT terminal: failed jobs regenerate (failed -> queued is a
+# valid job transition), so a fully-failed pipeline must stay actionable.
+PIPELINE_TERMINAL_STATUSES = ("declined", "closed", "expired")
 TREND_OPEN_STATUSES = ("detected", "dossier_building", "proposed", "approved")
 CONTENT_TYPES = ("article", "social_post", "newsletter_blurb", "video_script")
 
@@ -81,9 +86,11 @@ def validate_trend_transition(current: str, new: str) -> None:
         raise LifecycleError(f"Trend cannot go {current!r} → {new!r}")
 
 
-def require_open_pipeline(status: str) -> None:
-    """Job mutations (review/regenerate/publish) need a live parent pipeline."""
-    if status not in PIPELINE_OPEN_STATUSES:
+def require_recoverable_pipeline(status: str) -> None:
+    """Job mutations (review/regenerate/publish) are blocked only once the
+    pipeline hits a genuine dead end (declined/closed/expired) — 'failed' stays
+    actionable so a failed job can be regenerated."""
+    if status in PIPELINE_TERMINAL_STATUSES:
         raise LifecycleError(f"pipeline is {status!r} — reopen is not allowed")
 
 

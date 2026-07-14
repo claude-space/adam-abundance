@@ -65,11 +65,12 @@ def test_trend_transitions():
     lifecycle.validate_trend_transition("approved", "approved")
 
 
-def test_closed_pipeline_stays_closed():
-    for status in ("declined", "closed", "expired"):
-        assert _raises(lifecycle.require_open_pipeline, status), status
-    for status in lifecycle.PIPELINE_OPEN_STATUSES:
-        lifecycle.require_open_pipeline(status)
+def test_closed_pipeline_stays_closed_but_failed_recovers():
+    for status in lifecycle.PIPELINE_TERMINAL_STATUSES:
+        assert _raises(lifecycle.require_recoverable_pipeline, status), status
+    # 'failed' is NOT terminal: failed jobs must be able to regenerate.
+    for status in (*lifecycle.PIPELINE_OPEN_STATUSES, "failed"):
+        lifecycle.require_recoverable_pipeline(status)
 
 
 def test_content_types_validated():

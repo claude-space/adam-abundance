@@ -39,6 +39,16 @@ _SOURCE_ADAPTERS = (TavilyTrendAdapter, NewsApiTrendAdapter, FirecrawlTrendAdapt
 _MAX_NEW_PROPOSALS_PER_SCAN = 3
 
 
+def _evidence(item: dict[str, Any]) -> dict[str, Any]:
+    """Trim a normalized signal item (see _signals_from_memory) to the
+    {origin, source, title, url, published_at} shape Trend.evidence stores."""
+    return {
+        "origin": item.get("origin", ""), "source": item.get("source", ""),
+        "title": item.get("title", ""), "url": item.get("url", ""),
+        "published_at": item.get("published_at", ""),
+    }
+
+
 class TrendScout:
     def __init__(self, ctx: RunContext) -> None:
         self.ctx = ctx
