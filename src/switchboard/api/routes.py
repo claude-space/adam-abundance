@@ -768,10 +768,59 @@ async def _probe_services(urls: dict[str, str]) -> dict[str, bool]:
     return result
 
 
-async def _systems_overview(ctx: RunContext) -> list[dict[str, Any]]:
+# System name -> logo.dev domain (absent -> a 2-letter monogram is shown). Internal
+# Valnet agents/services have no public domain and fall back to the monogram.
+_SYSTEM_DOMAINS: dict[str, str] = {
+    "BigQuery": "cloud.google.com", "Google Sheets": "google.com", "GSC exports": "google.com",
+    "Ahrefs": "ahrefs.com", "Similarweb": "similarweb.com",
+    "Tavily": "tavily.com", "Perplexity": "perplexity.ai", "Firecrawl": "firecrawl.dev",
+    "NewsAPI": "newsapi.org", "Asana": "asana.com", "Gmail API": "google.com",
+    "Google Ads": "google.com", "Meta Ads": "meta.com", "Bing Ads": "bing.com",
+    "Anthropic (Claude)": "anthropic.com", "Slack": "slack.com", "Google OAuth": "google.com",
+    "PostgreSQL": "postgresql.org",
+}
+
+# System name -> the tool_call_log.tool names that represent it, for real 24h
+# volume / errors / success. Systems absent here have no mapped tools and read
+# "idle" (no usage) — honest for a low-traffic surface.
+_SYSTEM_TOOLS: dict[str, list[str]] = {
+    "BigQuery": ["bigquery_consum", "bigquery_discover"],
+    "Sentinel Pro": ["sentinel_traffic"],
+    "Google Sheets": ["sheets_quota"],
+    "Ahrefs": ["ahrefs_keywords", "ahrefs_serp", "ahrefs_backlinks"],
+    "Similarweb": ["similarweb_traffic"],
+    "Tavily": ["tavily_trends", "tavily_deep_search"],
+    "Perplexity": ["perplexity_trends"],
+    "Firecrawl": ["firecrawl_trends", "firecrawl_scrape"],
+    "NewsAPI": ["newsapi_trends"],
+}
+
+# System name -> metered spend metric, for the real cap-usage bar (spend_ledger).
+_SYSTEM_METRIC: dict[str, str] = {
+    "Anthropic (Claude)": "llm_micros", "BigQuery": "bq_bytes", "Ahrefs": "ahrefs_units",
+}
+
+
+def _fmt_bytes(n: int) -> str:
+    n = float(int(n or 0))
+    for unit, size in (("GiB", 1073741824), ("MiB", 1048576), ("KiB", 1024)):
+        if n >= size:
+            v = n / size
+            return f"{v:.1f} {unit}" if v < 100 else f"{v:.0f} {unit}"
+    return f"{int(n)} B"
+
+
+async def _system_matrix(ctx: RunContext) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Per-system usage + health, all real: reachability from the live service
+    probe, cap usage from spend_ledger (LLM/BigQuery/Ahrefs), and 24h volume /
+    errors / success from the tool_call_log audit trail. Returns the systems
+    grouped by category plus a health tally for the hero."""
+    from datetime import datetime as _dt, timedelta, timezone as _tz
+
     creds = ctx.creds
     present = creds.describe()
     endpoints = ctx.settings.endpoints
+
     # Live-probe every service row that actually has a URL, concurrently.
     service_urls = {
         key: endpoints[key]
@@ -780,13 +829,38 @@ async def _systems_overview(ctx: RunContext) -> list[dict[str, Any]]:
     }
     reachable = await _probe_services(service_urls) if service_urls else {}
 
+    # One pass over the last 24h of tool calls, grouped by tool.
+    since = _dt.now(_tz.utc) - timedelta(hours=24)
+    agg_rows = (await ctx.session.execute(
+        select(ToolCallLog.tool, func.count(),
+               func.sum(case((ToolCallLog.ok.is_(True), 1), else_=0)),
+               func.sum(case((ToolCallLog.ok.is_(False), 1), else_=0)))
+        .where(ToolCallLog.created_at >= since).group_by(ToolCallLog.tool)
+    )).all()
+    tool_agg = {t: (int(c), int(o or 0), int(e or 0)) for t, c, o, e in agg_rows}
+
+    spend = await _spend_snapshot(ctx)
+
+    def _cap_for(metric: str) -> dict[str, Any] | None:
+        s = spend.get(metric)
+        if not s or s.get("cap_per_day") is None:
+            return None
+        spent, cap = s["spent_today"], s["cap_per_day"]
+        if metric == "llm_micros":
+            detail = f"${spent/1e6:.2f} / ${cap/1e6:.2f}"
+        elif metric == "bq_bytes":
+            detail = f"{_fmt_bytes(spent)} / {_fmt_bytes(cap)}"
+        else:
+            detail = f"{spent:,} / {cap:,} units"
+        return {"pct": round(100 * spent / cap, 1) if cap else 0.0, "detail": detail}
+
+    counts = {"healthy": 0, "degraded": 0, "down": 0, "idle": 0}
     grouped: dict[str, list[dict[str, Any]]] = {}
     for category, name, owner, access, uses, check in SYSTEMS_META:
         kind, key = check
         note: str | None = None
-        # status ∈ {online, offline, configured, missing}; the summary counts
-        # treat everything except "missing" as configured (offline = set up but
-        # down, so it still counts as configured — the badge shows it's offline).
+        # status ∈ {online, offline, configured, missing}; summary counts treat
+        # everything except "missing" as configured (offline = set up but down).
         if kind == "service":
             note = endpoints.get(key)
             status = "missing" if not note else ("online" if reachable.get(key) else "offline")
@@ -799,11 +873,38 @@ async def _systems_overview(ctx: RunContext) -> list[dict[str, Any]]:
             status = "configured" if note else "missing"
         else:  # always
             status = "configured"
+
+        calls = ok = err = 0
+        for tname in _SYSTEM_TOOLS.get(name, []):
+            c, o, e = tool_agg.get(tname, (0, 0, 0))
+            calls, ok, err = calls + c, ok + o, err + e
+        success = round(100 * ok / calls) if calls else None
+
+        cap = _cap_for(_SYSTEM_METRIC[name]) if name in _SYSTEM_METRIC else None
+        cappct = cap["pct"] if cap else None
+
+        # Health: missing config takes precedence (idle); an offline service or a
+        # blown cap is down; recent errors or a near-cap read as degraded.
+        if status == "offline":
+            health = "down"
+        elif status == "missing":
+            health = "idle"
+        elif cappct is not None and cappct >= 100:
+            health = "down"
+        elif err > 0 or (cappct is not None and cappct >= 80):
+            health = "degraded"
+        else:
+            health = "healthy"
+        counts[health] += 1
+
         grouped.setdefault(category, []).append(
-            {"name": name, "owner": owner, "access": access, "uses": uses,
-             "status": status, "configured": status != "missing", "note": note}
+            {"name": name, "category": category, "owner": owner, "access": access, "uses": uses,
+             "status": status, "configured": status != "missing", "note": note,
+             "domain": _SYSTEM_DOMAINS.get(name), "health": health, "cap": cap,
+             "calls_24h": calls, "errors_24h": err, "success_pct": success}
         )
-    return [{"category": c, "systems": s} for c, s in grouped.items()]
+    matrix = [{"category": c, "systems": s} for c, s in grouped.items()]
+    return matrix, counts
 
 
 @router.get("/systems", response_class=HTMLResponse)
@@ -812,13 +913,13 @@ async def systems_page(request: Request):
     if not user:
         return RedirectResponse("/auth/login", status_code=302)
     async with RunContext.open() as ctx:
-        groups = await _systems_overview(ctx)
+        groups, health = await _system_matrix(ctx)
         total = sum(len(g["systems"]) for g in groups)
         connected = sum(1 for g in groups for s in g["systems"] if s["configured"])
     return templates.TemplateResponse(request, "systems.html",
                                       {"user": user, "groups": groups, "total": total,
-                                       "connected": connected, "consolidation": CONSOLIDATION,
-                                       "decisions": DECISIONS})
+                                       "connected": connected, "health": health,
+                                       "consolidation": CONSOLIDATION, "decisions": DECISIONS})
 
 
 @router.get("/distribution", response_class=HTMLResponse)
