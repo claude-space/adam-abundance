@@ -2,67 +2,96 @@
 {% block title %}Trend Radar — Switchboard{% endblock %}
 {% block body %}
 
-<div class="phero" style="--ph:#c9a84c">
-  <span class="pill-gold">Trend Radar</span>
-  <h2 style="margin-top:12px"><span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></span>
-    Trend Radar</h2>
-  <div class="ph-sub">Competitor trends clustered from Tavily · Perplexity · Firecrawl · NewsAPI · competitor RSS.
-    Hot trends file a pipeline request — nothing generates or publishes without your approval.</div>
-  <div class="ph-stats">
-    <span class="pillx">open trends <b>{{ stats.open }}</b></span>
-    <span class="pillx">awaiting approval <b>{{ stats.pending }}</b></span>
-    <span class="pillx">generating <b>{{ stats.generating }}</b></span>
-    <span class="pillx">previews ready <b>{{ stats.previews }}</b></span>
-    <span class="pillx">coverage gaps <b>{{ stats.gaps }}</b></span>
+{% macro stat_tile(label, value, color) %}
+<span style="border-radius:14px;padding:8px 14px;background:rgba(0,0,0,.35);border:1px solid var(--line-2);text-align:center;min-width:74px">
+  <span class="kpi-label" style="display:block">{{ label }}</span>
+  <span class="mono" style="font-weight:800;font-size:16px;color:{{ color }}">{{ value }}</span>
+</span>
+{% endmacro %}
+
+<div class="phero" style="--ph:#c9a84c;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:20px">
+  <div style="min-width:0">
+    <span class="pill-gold">Trend Radar</span>
+    <h2 style="margin-top:12px"><span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg></span>Trend Radar</h2>
+    <div class="ph-sub">Signals clustered from Tavily · Perplexity · Firecrawl · NewsAPI · competitor RSS.
+      Nothing generates or publishes without your approval. Threshold {{ trend_cfg.score_threshold|int }} · min {{ trend_cfg.min_sources }} outlets.</div>
+  </div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;max-width:520px">
+    {{ stat_tile('Open', stats.open, 'var(--accent)') }}
+    {{ stat_tile('Awaiting', stats.pending, 'var(--warn)') }}
+    {{ stat_tile('Generating', stats.generating, 'var(--good)') }}
+    {{ stat_tile('Previews', stats.previews, 'var(--accent-2)') }}
+    {{ stat_tile('Gaps', stats.gaps, 'var(--bad)') }}
   </div>
 </div>
 
 {% if scanning %}
-<div class="panel" style="border-color:color-mix(in srgb,#26c6a6 45%,transparent)">
+<div class="panel" style="border-color:color-mix(in srgb,var(--accent) 45%,transparent)">
   <b>Scan started.</b> <span class="muted">Sourcing + clustering (and dossiers for hot trends) can take a minute — refresh this page shortly.</span>
 </div>
 {% endif %}
 
-<div class="toolbar" style="margin-bottom:16px">
-  <form method="get" action="/trends" class="inline">
-    <label>brand
-      <select name="brand" onchange="this.form.submit()">
-        <option value="">all</option>
-        <option value="portfolio" {% if f.brand=='portfolio' %}selected{% endif %}>portfolio</option>
-        {% for b in brands %}<option value="{{ b }}" {% if f.brand==b %}selected{% endif %}>{{ b }}</option>{% endfor %}
-      </select>
-    </label>
+<div class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:22px">
+  <form method="get" action="/trends" class="inline" style="display:flex;align-items:center;gap:8px">
+    <span class="kpi-label">Brand</span>
+    <select name="brand" onchange="this.form.submit()">
+      <option value="">all</option>
+      <option value="portfolio" {% if f.brand=='portfolio' %}selected{% endif %}>portfolio</option>
+      {% for b in brands %}<option value="{{ b }}" {% if f.brand==b %}selected{% endif %}>{{ b }}</option>{% endfor %}
+    </select>
   </form>
-  <form method="post" action="/trends/scan" class="inline">
+  <form method="post" action="/trends/scan" class="inline" style="margin-left:auto">
     <input type="hidden" name="brand" value="{{ f.brand or 'portfolio' }}" />
-    <button type="submit">Scan now</button>
+    <button type="submit">◎ Scan now</button>
   </form>
 </div>
 
+<!-- ===== Brand trend coverage ===== -->
+<div class="sect"><span class="rule-gold"></span>Brand trend coverage <span class="hint">current open trends</span></div>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr));margin-bottom:22px">
+  {% for c in coverage %}
+  {% set sc = ('var(--good)' if (c.score or 0)>=80 else ('var(--accent)' if (c.score or 0)>=65 else ('var(--warn)' if (c.score or 0)>=50 else 'var(--bad)'))) if c.score is not none else 'var(--line-2)' %}
+  <div class="card" style="border-top:2px solid {{ sc }};display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <div style="font-weight:700;font-size:14px">{{ c.display_name }}</div>
+      <span class="logo-plate" style="height:28px;padding:0 10px;border-radius:8px"><img src="/static/brand-logos/{{ c.brand }}.avif" style="max-height:18px;max-width:80px;object-fit:contain" onerror="this.style.display='none'"/></span>
+    </div>
+    <div>
+      <div class="kpi-label">Coverage score</div>
+      <div class="mono" style="font-weight:800;font-size:32px;line-height:1;color:{{ sc if c.score is not none else 'var(--muted)' }}">{{ c.score if c.score is not none else '—' }}</div>
+    </div>
+    <div class="grid" style="grid-template-columns:repeat(3,1fr);gap:8px;border-top:1px solid var(--line);padding-top:10px">
+      <div><div class="kpi-label">Covered</div><div class="mono" style="font-weight:700;font-size:13px;color:var(--good)">{{ c.covered }}</div></div>
+      <div><div class="kpi-label">Gaps</div><div class="mono" style="font-weight:700;font-size:13px;color:{{ 'var(--bad)' if c.gaps>3 else 'var(--warn)' }}">{{ c.gaps }}</div></div>
+      <div><div class="kpi-label">Pending</div><div class="mono" style="font-weight:700;font-size:13px;color:{{ 'var(--accent-2)' if c.pending>0 else 'var(--muted)' }}">{{ c.pending }}</div></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<!-- ===== Pipeline requests awaiting decision ===== -->
 {% if pending %}
-<div class="panel" style="border-color:color-mix(in srgb,var(--warn) 45%,transparent)">
-  <h3>Pipeline requests awaiting a decision
-    <span class="hint muted">approve to generate content · decline to close</span></h3>
-  <table>
-    <thead><tr><th>Trend</th><th>Brand</th><th>Content</th><th>Requested by</th><th>Created</th><th></th></tr></thead>
+<div class="sect"><span class="rule-gold"></span>Pipeline requests awaiting decision <span class="hint">approve to generate · decline to close</span></div>
+<div class="card" style="padding:0;overflow:hidden;margin-bottom:22px">
+  <table class="sortable">
+    <thead><tr><th data-k>Trend</th><th data-k>Brand</th><th data-k class="num">Score</th><th data-k>Requested by</th><th data-k>Created</th><th style="text-align:right">Actions</th></tr></thead>
     <tbody>
     {% for p in pending %}
       <tr>
-        <td><a href="/pipelines/{{ p.id }}">{{ p.headline }}</a>
-          {% if p.trend_score %}<span class="badge accent">score {{ p.trend_score }}</span>{% endif %}</td>
-        <td>{{ p.brand }}</td>
-        <td>{% for ct in p.content_types %}<span class="chip">{{ ct|replace('_',' ') }}</span> {% endfor %}</td>
+        <td><a href="/pipelines/{{ p.id }}" style="color:var(--ink);font-weight:600">{{ p.headline }}</a></td>
+        <td class="mono muted">{{ p.brand }}</td>
+        <td class="num" style="color:var(--accent);font-weight:700">{{ p.trend_score or '—' }}</td>
         <td class="muted">{{ p.requested_by }}</td>
-        <td class="muted">{{ p.created_at }}</td>
-        <td style="white-space:nowrap">
+        <td class="muted mono">{{ p.created_at }}</td>
+        <td style="text-align:right;white-space:nowrap">
           {% if p.can_approve %}
           <form method="post" action="/pipelines/{{ p.id }}/approve" class="inline">
-            <button type="submit">Approve</button>
+            <button type="submit" style="background:var(--good);color:#06120a;margin-right:6px">Approve</button>
           </form>
           <form method="post" action="/pipelines/{{ p.id }}/decline" class="inline">
             <button type="submit" class="danger" onclick="return confirm('Decline this pipeline request?')">Decline</button>
           </form>
-          {% else %}<span class="badge muted">approver role required</span>{% endif %}
+          {% else %}<span class="badge-base badge-muted">approver role required</span>{% endif %}
         </td>
       </tr>
     {% endfor %}
@@ -71,49 +100,57 @@
 </div>
 {% endif %}
 
-<div class="panel">
-  <h3>Open trends <span class="hint muted">ranked by score · min {{ trend_cfg.min_sources }} outlets · propose at ≥ {{ trend_cfg.score_threshold|int }}</span></h3>
-  {% if trends %}
-  <table>
-    <thead><tr><th>Score</th><th>Trend</th><th>Signals</th><th>Status</th><th>Seen</th><th></th></tr></thead>
-    <tbody>
-    {% for t in trends %}
-      <tr>
-        <td class="num"><b>{{ t.score }}</b></td>
-        <td>
-          <a href="/trends/{{ t.id }}">{{ t.headline }}</a><br>
-          {% if t.breaking %}<span class="badge live">breaking</span>{% endif %}
-          {% if t.covered_by_us == false %}<span class="badge accent">coverage gap</span>{% endif %}
-          {% if t.covered_by_us == true %}<span class="badge muted">we covered it</span>{% endif %}
-          {% if t.watchlisted %}<span class="badge dry">watchlist</span>{% endif %}
-          {% if t.origin == 'manual' %}<span class="badge muted">manual</span>{% endif %}
-          {% for o in t.oems[:3] %}<span class="chip">{{ o }}</span>{% endfor %}
-        </td>
-        <td class="num">{{ t.source_count }} outlets · {{ t.signal_count }} items</td>
-        <td><span class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</span>
-          {% if t.pending_pipeline_id %}<br><a href="/pipelines/{{ t.pending_pipeline_id }}" class="badge dry">request pending</a>{% endif %}</td>
-        <td class="muted">{{ t.last_seen or t.first_seen }}</td>
-        <td style="white-space:nowrap">
-          {% if not t.pending_pipeline_id and t.status in ('detected','dossier_building','proposed') %}
-            <a href="/trends/{{ t.id }}"><button type="button" class="ghost">Trigger…</button></a>
-          {% endif %}
-          {% if t.can_approve and t.status in ('detected','dossier_building','proposed') %}
-          <form method="post" action="/trends/{{ t.id }}/dismiss" class="inline">
-            <button type="submit" class="ghost" onclick="return confirm('Dismiss this trend? A matching cluster will not be re-proposed for {{ trend_cfg.dedup_days }} days.')">Dismiss</button>
-          </form>
-          {% endif %}
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-  {% else %}
-  <div class="empty"><div class="e-icon">📡</div>No open trends. Run a scan, or add one manually below.</div>
-  {% endif %}
+<!-- ===== Open trends (cards) ===== -->
+<div class="sect"><span class="rule-gold"></span>Open trends <span class="hint">ranked by score</span></div>
+{% if trends %}
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(340px,1fr));margin-bottom:22px">
+  {% for t in trends %}
+  <div class="card card-hover" style="border-top:2px solid var(--accent-2);display:flex;flex-direction:column;gap:12px">
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+      <div style="display:flex;align-items:center;gap:12px;min-width:0">
+        <span class="icon-tile" style="--c:var(--accent-2);width:40px;height:40px;border-radius:12px;font-family:var(--font-mono);font-weight:800;font-size:13px;text-transform:uppercase">{{ (t.oems[0][:2] if t.oems else '◎') }}</span>
+        <div style="min-width:0">
+          <div class="mono" style="font-size:11px;color:var(--muted)">#{{ t.id }} · {{ t.brand }}</div>
+          <div style="font-size:14px;font-weight:700;line-height:1.3"><a href="/trends/{{ t.id }}" style="color:var(--ink)">{{ t.headline }}</a></div>
+        </div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div class="kpi-label">Score</div>
+        <div class="mono" style="font-weight:800;font-size:20px;color:var(--accent)">{{ t.score }}</div>
+      </div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+      {% if t.breaking %}<span class="badge-base badge-live">breaking</span>{% endif %}
+      {% if t.covered_by_us == false %}<span class="badge-base badge-dry">coverage gap</span>{% endif %}
+      {% if t.covered_by_us == true %}<span class="badge-base badge-muted">we covered it</span>{% endif %}
+      {% if t.watchlisted %}<span class="badge-base badge-accent">watchlist</span>{% endif %}
+      {% if t.origin == 'manual' %}<span class="badge-base badge-muted">manual</span>{% endif %}
+      {% for o in t.oems[:3] %}<span class="chip">{{ o }}</span>{% endfor %}
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-2)">
+      <span class="adot" style="margin:0;background:{{ 'var(--warn)' if t.status in ('dossier_building','generating','pending_approval') else ('var(--accent)' if t.status in ('proposed','approved','previews_ready') else 'var(--muted)') }}"></span>
+      <span style="font-weight:600">{{ t.status|replace('_',' ') }}</span>
+      <span class="muted">· {{ t.source_count }} outlets · {{ t.signal_count }} signals</span>
+      <a href="/trends/{{ t.id }}" style="margin-left:auto;color:var(--muted)" title="open trend">↗</a>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      {% if t.pending_pipeline_id %}<a href="/pipelines/{{ t.pending_pipeline_id }}" class="badge-base badge-dry">request pending →</a>{% endif %}
+      {% if t.can_approve and t.status in ('detected','dossier_building','proposed') %}
+      <form method="post" action="/trends/{{ t.id }}/dismiss" class="inline">
+        <button type="submit" class="ghost" onclick="return confirm('Dismiss this trend? A matching cluster will not be re-proposed for {{ trend_cfg.dedup_days }} days.')">Dismiss</button>
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
 </div>
+{% else %}
+<div class="empty"><div class="e-icon">📡</div>No open trends. Run a scan, or add one manually below.</div>
+{% endif %}
 
+<!-- ===== Add trend manually ===== -->
 <div class="panel">
-  <h3>Add a trend manually <span class="hint muted">rides the same dossier → approval → generation path</span></h3>
+  <h3><span class="rule-gold"></span>Add a trend manually <span class="hint">rides the same dossier → approval → generation path</span></h3>
   <form method="post" action="/trends/manual">
     <div class="toolbar">
       <label>topic / headline<br><input type="text" name="topic" size="46" placeholder="e.g. Tesla recalls 300k Model Y over steering fault" required /></label>
@@ -129,18 +166,19 @@
   </form>
 </div>
 
+<!-- ===== Recently closed ===== -->
 {% if closed %}
-<div class="panel">
-  <h3>Recently closed <span class="hint muted">dismissed / declined / expired / completed — dedup window {{ trend_cfg.dedup_days }}d</span></h3>
-  <table>
-    <thead><tr><th>Trend</th><th>Score</th><th>Status</th><th>Seen</th></tr></thead>
+<div class="sect"><span class="rule-gold"></span>Recently closed <span class="hint">dedup window {{ trend_cfg.dedup_days }}d</span></div>
+<div class="card" style="padding:0;overflow:hidden">
+  <table class="sortable">
+    <thead><tr><th data-k>Trend</th><th data-k class="num">Score</th><th data-k>Status</th><th data-k>Seen</th></tr></thead>
     <tbody>
     {% for t in closed %}
       <tr>
         <td><a href="/trends/{{ t.id }}">{{ t.headline }}</a></td>
         <td class="num">{{ t.score }}</td>
-        <td><span class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</span></td>
-        <td class="muted">{{ t.last_seen or t.first_seen }}</td>
+        <td data-v="{{ t.status }}"><span class="status-{{ t.status }}">{{ t.status|replace('_',' ') }}</span></td>
+        <td class="muted mono">{{ t.last_seen or t.first_seen }}</td>
       </tr>
     {% endfor %}
     </tbody>

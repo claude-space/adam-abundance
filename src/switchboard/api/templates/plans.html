@@ -78,14 +78,23 @@
 <!-- ============ CAPS + FLEET ============ -->
 <div class="grid rise rise-3" style="grid-template-columns:minmax(320px,1fr) minmax(360px,1.6fr);margin-bottom:22px">
   <div class="panel" style="margin:0">
-    <h3><span class="rule-gold"></span>Spend vs caps <span class="hint">today</span></h3>
-    <div class="gauges">
-      {% for g in gauges %}
-      <div class="gauge-wrap">
-        <div class="gauge" style="--pct:{{ [g.pct,100]|min }}; --gc:{{ 'var(--bad)' if g.pct>=95 else ('var(--warn)' if g.pct>=75 else 'var(--accent)') }}">
-          <div class="g-inner"><div><div class="g-val">{{ g.val }}</div><div class="g-pct">{{ g.pct }}%</div></div></div>
+    <h3><span class="rule-gold"></span>Resource usage <span class="hint">today vs yesterday</span></h3>
+    <div style="display:flex;flex-direction:column">
+      {% for r in resources %}
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid var(--line)">
+        <span class="icon-tile" style="--c:{{ r.c }};width:34px;height:34px;font-family:var(--font-mono);font-weight:700;font-size:12px">{{ r.mono }}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:700;color:var(--ink)">{{ r.label }}</div>
+          <div class="mono" style="font-size:11px;color:var(--muted);margin-top:2px">was {{ r.prev }} yesterday</div>
         </div>
-        <div class="g-label">{{ g.label }}</div><div class="g-cap">{{ g.cap }}</div>
+        <div style="text-align:right">
+          <div class="mono" style="font-weight:800;font-size:18px;color:var(--ink)">{{ r.val }}</div>
+          {% if r.pct is not none %}
+          <div class="delta {{ 'up' if r.pct>0 else ('down' if r.pct<0 else 'flat') }}" style="margin-top:5px">{{ '▲' if r.pct>0 else ('▼' if r.pct<0 else '—') }} {{ '%+.1f'|format(r.pct) }}%</div>
+          {% else %}
+          <div class="mono" style="font-size:10px;color:var(--muted);margin-top:5px">no baseline</div>
+          {% endif %}
+        </div>
       </div>
       {% endfor %}
     </div>

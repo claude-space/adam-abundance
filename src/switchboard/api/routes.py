@@ -210,6 +210,19 @@ async def home(request: Request):
     fleet_max = max((a["entries"] for a in fleet), default=1) or 1
     caps = settings.caps
     _llm_cap, _bq_cap, _ah_cap = caps.per_day("llm_micros"), caps.per_day("bq_bytes"), caps.per_day("ahrefs_units")
+    # Resource-usage list (Lovable dashboard): metered resources today, with a
+    # "was X yesterday" baseline + real delta. Only the three the governor meters.
+    resources = [
+        {"label": "LLM spend", "mono": "AI", "c": "var(--accent-2)",
+         "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
+         "prev": f"${deltas['llm_micros']['prev']/1e6:.2f}", "pct": deltas["llm_micros"]["pct"]},
+        {"label": "BigQuery", "mono": "BQ", "c": "var(--good)",
+         "val": f"{spend['bq_bytes']['spent_today']/1048576:.0f} MB",
+         "prev": f"{deltas['bq_bytes']['prev']/1048576:.0f} MB", "pct": deltas["bq_bytes"]["pct"]},
+        {"label": "Ahrefs units", "mono": "Ah", "c": "var(--warn)",
+         "val": f"{spend['ahrefs_units']['spent_today']}",
+         "prev": f"{deltas['ahrefs_units']['prev']}", "pct": deltas["ahrefs_units"]["pct"]},
+    ]
     gauges = [
         {"label": "LLM spend", "gc": "#5b9dff", "pct": spend["llm_micros"]["pct"] or 0,
          "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
@@ -226,7 +239,7 @@ async def home(request: Request):
         {"user": user, "plans": plans, "brands": list(settings.brand_keys),
          "kill_switch": settings.kill_switch, "portfolio": portfolio, "stats": stats, "fleet": fleet,
          "hero": hero, "gauges": gauges, "fleet_max": fleet_max, "caps_enabled": caps.enabled,
-         "deltas": deltas},
+         "deltas": deltas, "resources": resources},
     )
 
 
@@ -879,6 +892,7 @@ async def trends_page(request: Request, brand: str | None = None, scanning: str 
             statuses=["dismissed", "declined", "expired", "completed"], limit=15)]
         pipelines = [_pipeline_dict(p, with_jobs=False)
                      for p in await PipelineRepo(ctx.session).list(brand=brand or None, limit=40)]
+        coverage = await _brand_coverage(ctx, list(settings.brand_keys))
     # Approvability is per row — a brand_user may approve their brand's rows on
     # an unfiltered (portfolio-wide) page.
     for row in (*open_trends, *recent_closed, *pipelines):
@@ -895,10 +909,37 @@ async def trends_page(request: Request, brand: str | None = None, scanning: str 
         request, "trends.html",
         {"user": user, "trends": open_trends, "closed": recent_closed, "pending": pending,
          "pipelines": pipelines[:20], "stats": stats, "brands": list(settings.brand_keys),
-         "content_types": list(CONTENT_TYPES),
+         "content_types": list(CONTENT_TYPES), "coverage": coverage,
          "kill_switch": settings.kill_switch, "trend_cfg": settings.trends,
          "scanning": scanning == "1", "f": {"brand": brand or ""}},
     )
+
+
+async def _brand_coverage(ctx: RunContext, brand_keys: list[str]) -> list[dict[str, Any]]:
+    """Per-brand coverage scorecard from the trend table (Lovable's brandCoverage).
+    Score = % of open trends we've covered; no day-delta (no history kept)."""
+    settings = get_settings()
+    open_st = ["detected", "dossier_building", "proposed", "approved"]
+    out = []
+    for b in brand_keys:
+        async def _c(*conds):
+            return int((await ctx.session.execute(
+                select(func.count()).select_from(Trend).where(*conds))).scalar_one())
+        covered = await _c(Trend.brand == b, Trend.covered_by_us.is_(True), Trend.status.in_(open_st))
+        gaps = await _c(Trend.brand == b, Trend.covered_by_us.is_(False), Trend.status.in_(open_st))
+        pending = int((await ctx.session.execute(
+            select(func.count()).select_from(ContentPipeline)
+            .where(ContentPipeline.brand == b, ContentPipeline.status == "pending_approval")
+        )).scalar_one())
+        denom = covered + gaps
+        try:
+            display = settings.brand(b).display_name
+        except KeyError:
+            display = b
+        out.append({"brand": b, "display_name": display,
+                    "score": round(100 * covered / denom) if denom else None,
+                    "covered": covered, "gaps": gaps, "pending": pending})
+    return out
 
 
 @router.post("/trends/scan")
