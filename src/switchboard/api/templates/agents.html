@@ -102,11 +102,13 @@
     <p class="ac-domain" style="margin:0;min-height:auto">{{ a.domain }}</p>
 
     <div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
+      <div style="display:flex;justify-content:space-between;margin-bottom:6px">
         <span class="kpi-label">Utilization</span>
         <span class="mono" style="font-size:11px;font-weight:700;color:var(--ink-2)">{{ util }}%</span>
       </div>
-      <span class="bar" style="height:4px"><span style="width:{{ util }}%;background:{{ 'var(--bad)' if a.errors else a.color }}"></span></span>
+      <div style="height:2px;border-radius:999px;background:rgba(255,255,255,.07);overflow:hidden">
+        <div style="height:100%;width:{{ util }}%;border-radius:999px;background:{{ 'var(--bad)' if a.errors else a.color }}"></div>
+      </div>
     </div>
 
     <div class="ac-tools" style="margin:0">
