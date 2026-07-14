@@ -20,7 +20,10 @@ from .base import BaseAdapter
 from .clients.firecrawl import FirecrawlClient
 from .clients.newsapi import NewsApiClient
 from .clients.perplexity import PerplexityClient
+from .clients.semrush import SemrushClient
 from .clients.tavily import TavilyClient
+from .clients.x_api import XClient
+from .clients.youtube import YouTubeClient
 
 log = get_logger("adapter.trend_sources")
 
@@ -131,3 +134,33 @@ class PerplexityTrendAdapter(_TrendSourceAdapter):
         if not items:
             return [], cost
         return [_signals_draft(self.source_system, items)], cost
+
+
+class YouTubeTrendAdapter(_TrendSourceAdapter):
+    name = "youtube_trends"
+    source_system = "youtube"
+
+    async def _pull(self) -> list[dict[str, Any]]:
+        client = YouTubeClient(self.ctx.creds.youtube_key())
+        results = await client.search_recent(self._query(), days=2, max_results=10)
+        return [_norm("youtube", r) for r in results]
+
+
+class XTrendAdapter(_TrendSourceAdapter):
+    name = "x_trends"
+    source_system = "x"
+
+    async def _pull(self) -> list[dict[str, Any]]:
+        client = XClient(self.ctx.creds.x_bearer())
+        results = await client.search_recent(self._query(), max_results=10)
+        return [_norm("x", r) for r in results]
+
+
+class SemrushTrendAdapter(_TrendSourceAdapter):
+    name = "semrush_trends"
+    source_system = "semrush"
+
+    async def _pull(self) -> list[dict[str, Any]]:
+        client = SemrushClient(self.ctx.creds.semrush_key())
+        results = await client.related_phrases(self.ctx.settings.trends.base_query, limit=10)
+        return [_norm("semrush", r) for r in results]

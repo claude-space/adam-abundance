@@ -27,7 +27,9 @@ class HCViralClient:
             import httpx  # type: ignore
         except ImportError as exc:  # pragma: no cover
             raise AdapterUnavailable("httpx not installed") from exc
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        # ShellAgent 308-redirects API paths to add a trailing slash; follow it
+        # (same-origin, so the X-API-Key header is preserved).
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
             resp = await client.get(f"{self._base}{path}", params=params, headers=self._headers())
             resp.raise_for_status()
             return resp.json()
@@ -38,3 +40,11 @@ class HCViralClient:
             params["status"] = status
         data = await self._get("/api/cms/drafts", params)
         return data if isinstance(data, list) else data.get("drafts", [])
+
+    async def list_topics(self, brand: str) -> list[dict[str, Any]]:
+        """Every topic HC-Viral is tracking for a brand (any status), used for the
+        cross-monitor corroboration check. Targets the machine topics surface
+        (`/api/cms/topics`); callers should fall back to ``list_drafts`` when it
+        isn't exposed yet (this raises on 404)."""
+        data = await self._get("/api/cms/topics", {"brand": brand})
+        return data if isinstance(data, list) else data.get("topics", data.get("drafts", []))

@@ -1,79 +1,126 @@
 {% extends "base.html" %}
-{% block title %}Dashboard — Switchboard{% endblock %}
+{% block title %}Command Hub — Switchboard{% endblock %}
 {% block body %}
 
-<div class="hero rise">
-  <h1>{{ hero.greeting }}{% if hero.name %}, {{ hero.name }}{% endif %}</h1>
-  <div class="date">{{ hero.date }} · Valnet Auto portfolio</div>
-  {% if stats %}
-  <div class="status">
-    <span class="pill">▦ <b>{{ brands|length }}</b> brands</span>
-    <span class="pill">⚑ <b style="color:{{ 'var(--bad)' if stats.active_flags>15 else 'var(--ink)' }}">{{ stats.active_flags }}</b> active flags</span>
-    <span class="pill">✓ <b>{{ stats.verified_facts }}</b> verified facts</span>
-    <span class="pill">◷ <b>{{ stats.plans_today }}</b> plans today</span>
-    <span class="pill">$ <b>{{ '%.2f'|format(stats.llm_usd) }}</b> LLM · <b>{{ stats.bq_mb }}</b> MB BQ</span>
-    <span class="pill">{% if kill_switch %}<b style="color:var(--bad)">● kill switch on</b>{% else %}<b style="color:var(--good)">● all systems go</b>{% endif %}</span>
-  </div>
+{# --- delta-chip macro (real today-vs-yesterday) --- #}
+{% macro delta_chip(d) %}
+  {% if d and d.pct is not none %}
+    {% set up = d.pct > 0 %}
+    <span class="delta {{ 'up' if up else ('down' if d.pct < 0 else 'flat') }}">
+      {{ '▲' if up else ('▼' if d.pct < 0 else '—') }} {{ '%+.1f'|format(d.pct) }}%</span>
   {% endif %}
+{% endmacro %}
+
+<!-- ============ HERO ============ -->
+<div class="hero rise" style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:22px">
+  <div style="min-width:0">
+    <div class="hero status">
+      <span class="pill-gold">Valnet Auto Portfolio</span>
+      <span class="pill-live"><span class="pulse-dot"></span> {{ 'Halted' if kill_switch else 'System Nominal' }}</span>
+    </div>
+    <h1>{{ hero.greeting }}{% if hero.name %}, <span style="color:var(--accent-2)">{{ hero.name }}</span>{% endif %}</h1>
+    {% if stats %}
+    <div class="date">{{ hero.date }} · {{ brands|length }} brands ·
+      <b style="color:{{ 'var(--bad)' if stats.active_flags>0 else 'var(--good)' }}">{{ stats.active_flags }}</b> active flags ·
+      <b style="color:var(--ink)">{{ stats.verified_facts }}</b> verified facts</div>
+    {% endif %}
+  </div>
+  <form method="post" action="/cycle"
+        style="display:flex;align-items:stretch;gap:12px;background:rgba(0,0,0,.35);border:1px solid var(--line-2);border-radius:var(--radius-lg);padding:12px;box-shadow:var(--shadow-gold)">
+    <div style="display:flex;flex-direction:column;justify-content:center;padding:0 6px">
+      <div class="kpi-label">Morning Cycle</div>
+      <select name="brand" style="border:0;background:transparent;padding:2px 0;font-weight:600;color:var(--ink)">
+        <option value="all">All brands</option>
+        {% for b in brands %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
+      </select>
+    </div>
+    <button type="submit" style="text-transform:uppercase;letter-spacing:.14em;font-size:12px;padding:0 20px;box-shadow:var(--shadow-gold)">Run Cycle</button>
+  </form>
 </div>
 
 {% if stats %}
-<div class="grid rise rise-2" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr));margin-bottom:16px">
-  <div class="card kpi tile" style="--c:{{ 'var(--bad)' if stats.active_flags>15 else 'var(--warn)' }}">
+<!-- ============ KPI ROW ============ -->
+<div class="grid rise rise-2" style="grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:22px">
+  <div class="card card-hover kpi tile" style="--c:{{ 'var(--bad)' if stats.active_flags>0 else 'var(--good)' }}">
     <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></span>
-      <span class="label" style="margin:0">Active flags</span></div>
-    <div class="num" style="color:{{ 'var(--bad)' if stats.active_flags>15 else ('var(--warn)' if stats.active_flags>0 else 'var(--good)') }}">{{ stats.active_flags }}</div>
+      <span class="kpi-label">Active flags</span></div>
+    <div class="kpi-num" style="color:{{ 'var(--bad)' if stats.active_flags>0 else 'var(--good)' }}">{{ stats.active_flags }}</div>
     <div class="foot">across all brands</div></div>
 
-  <div class="card kpi tile" style="--c:var(--good)">
+  <div class="card card-hover kpi tile" style="--c:var(--good)">
     <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg></span>
-      <span class="label" style="margin:0">Verified facts</span></div>
-    <div class="num" style="color:var(--good)">{{ stats.verified_facts }}</div>
+      <span class="kpi-label">Verified facts</span></div>
+    <div class="kpi-num" style="color:var(--ink)">{{ stats.verified_facts }}</div>
     <div class="foot">passed the fact-gate</div></div>
 
-  <div class="card kpi tile" style="--c:var(--accent)">
+  <div class="card card-hover kpi tile" style="--c:var(--accent)">
     <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2"/><path d="M9 13l2 2 4-4"/></svg></span>
-      <span class="label" style="margin:0">Plans today</span></div>
-    <div class="num">{{ stats.plans_today }}</div>
+      <span class="kpi-label">Plans today</span></div>
+    <div class="kpi-num">{{ stats.plans_today }}</div>
     <div class="foot">drafted for review</div></div>
 
-  <div class="card kpi tile" style="--c:var(--accent-2)">
+  <div class="card card-hover kpi tile" style="--c:var(--accent-2)">
     <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h7l-1 8 10-12h-7z"/></svg></span>
-      <span class="label" style="margin:0">LLM spend</span></div>
-    <div class="num sm">${{ '%.2f'|format(stats.llm_usd) }}</div>
-    <div class="foot">{% if caps_enabled %}of $20.00 daily cap{% else %}today · caps off{% endif %}</div></div>
+      <span class="kpi-label">LLM spend</span></div>
+    <div class="kpi-num-sm">${{ '%.2f'|format(stats.llm_usd) }}</div>
+    <div class="foot" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span>{% if caps_enabled %}of $20.00 cap{% else %}today · caps off{% endif %}</span>{{ delta_chip(deltas.llm_micros) }}</div></div>
 
-  <div class="card kpi tile" style="--c:var(--good)">
+  <div class="card card-hover kpi tile" style="--c:var(--good)">
     <div class="k-top"><span class="k-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="8.5" ry="3"/><path d="M3.5 5v14c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3V5"/><path d="M3.5 12c0 1.7 3.8 3 8.5 3s8.5-1.3 8.5-3"/></svg></span>
-      <span class="label" style="margin:0">BigQuery today</span></div>
-    <div class="num sm">{{ stats.bq_mb }} MB</div>
-    <div class="foot">scanned · read-only</div></div>
+      <span class="kpi-label">BigQuery</span></div>
+    <div class="kpi-num-sm">{{ stats.bq_mb }} MB</div>
+    <div class="foot" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+      <span>scanned today</span>{{ delta_chip(deltas.bq_bytes) }}</div></div>
 </div>
 {% endif %}
 
-<div class="grid rise rise-3" style="grid-template-columns:minmax(320px,1fr) minmax(340px,1.4fr);margin-bottom:16px">
+<!-- ============ CAPS + FLEET ============ -->
+<div class="grid rise rise-3" style="grid-template-columns:minmax(320px,1fr) minmax(360px,1.6fr);margin-bottom:22px">
   <div class="panel" style="margin:0">
-    <h3>Spend vs caps <span class="hint muted">today</span></h3>
-    <div class="gauges">
-      {% for g in gauges %}
-      <div class="gauge-wrap">
-        <div class="gauge" style="--pct:{{ [g.pct,100]|min }}; --gc:{{ 'var(--bad)' if g.pct>=100 else ('var(--warn)' if g.pct>=75 else 'var(--good)') }}">
-          <div class="g-inner"><div><div class="g-val">{{ g.val }}</div><div class="g-pct">{{ g.pct }}%</div></div></div>
+    <h3><span class="rule-gold"></span>Resource usage <span class="hint">today vs yesterday</span></h3>
+    <div style="display:flex;flex-direction:column">
+      {% for r in resources %}
+      <div style="display:flex;align-items:center;gap:12px;padding:12px 2px;border-bottom:1px solid var(--line)">
+        {% set lu = logo_url(r.domain) %}
+        <span class="logo-plate" style="position:relative;width:40px;height:40px;border-radius:50%;flex-shrink:0">
+          <span style="font-family:var(--font-mono);font-weight:700;color:#222;font-size:12px">{{ r.label[:2]|upper }}</span>
+          {% if lu %}<img src="{{ lu }}" alt="" style="position:absolute;inset:0;margin:auto;width:24px;height:24px;object-fit:contain" onerror="this.remove()"/>{% endif %}
+        </span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:700;color:var(--ink)">{{ r.label }}</div>
+          <div class="mono" style="font-size:11px;color:var(--muted);margin-top:2px">was {{ r.prev }} yesterday</div>
         </div>
-        <div class="g-label">{{ g.label }}</div><div class="g-cap">{{ g.cap }}</div>
+        <div style="text-align:right">
+          <div class="mono" style="font-weight:800;font-size:18px;color:var(--ink)">{{ r.val }}</div>
+          {% if r.pct is not none %}
+          <div class="delta {{ 'warn' if r.pct>0 else ('down' if r.pct<0 else 'flat') }}" style="margin-top:5px">{{ '▲' if r.pct>0 else ('▼' if r.pct<0 else '—') }} {{ '%+.1f'|format(r.pct) }}%</div>
+          {% else %}
+          <div class="mono" style="font-size:10px;color:var(--muted);margin-top:5px">no baseline</div>
+          {% endif %}
+        </div>
       </div>
       {% endfor %}
     </div>
   </div>
 
   <div class="panel" style="margin:0">
-    <h3>Agent fleet <span class="hint"><a href="/agents">open agents →</a></span></h3>
-    <div class="fleet-list">
+    <h3><span class="rule-gold"></span>Agent fleet activity <span class="hint"><a href="/agents">open agents →</a></span></h3>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
       {% for a in fleet %}
-      <a class="fleet-row" href="/agents/{{ a.key }}">
-        <span class="fr-name"><span class="adot" style="background:{{ a.color }}"></span>{{ a.display }}</span>
-        <span class="fr-track"><span class="fr-fill" style="width:{{ ((a.entries / fleet_max * 100) if fleet_max else 0)|round(0)|int }}%;background:{{ a.color }}"></span></span>
-        <span class="fr-num">{{ a.entries }} · {{ a.calls }} calls</span>
+      {% set live = a.entries > 20 %}
+      <a class="card card-hover" href="/agents/{{ a.key }}" style="--c:{{ a.color }};padding:14px 15px;display:flex;flex-direction:column;gap:10px;color:inherit;border-color:{{ 'color-mix(in srgb,'~a.color~' 30%,var(--line))' if live else 'var(--line)' }}">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div><div style="font-weight:700;font-size:13px;color:var(--ink)">{{ a.display }}</div>
+            <div class="kpi-label" style="margin-top:2px;color:{{ 'var(--good)' if live else 'var(--muted)' }}">{{ '● live' if live else '○ idle' }}</div></div>
+        </div>
+        <span class="spark" data-seed="{{ a.key }}" style="--c:{{ a.color }};height:34px">
+          {% for i in range(8) %}<span></span>{% endfor %}
+        </span>
+        <div style="display:flex;justify-content:space-between;align-items:baseline;border-top:1px solid var(--line);padding-top:9px">
+          <div><div class="mono" style="font-weight:800;font-size:17px;color:var(--ink)">{{ a.entries }}</div><div class="kpi-label" style="margin-top:2px">entries</div></div>
+          <div style="text-align:right"><div class="mono" style="font-weight:700;font-size:13px;color:var(--ink-2)">{{ a.calls }}</div><div class="kpi-label" style="margin-top:2px">calls</div></div>
+        </div>
       </a>
       {% endfor %}
     </div>
@@ -81,19 +128,25 @@
 </div>
 
 {% if portfolio %}
-<div class="grid rise rise-3" style="grid-template-columns:repeat(auto-fit,minmax(270px,1fr));margin-bottom:16px">
+<!-- ============ BRAND CARDS ============ -->
+<div class="grid rise rise-4" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-bottom:22px">
   {% for b in portfolio.brands %}
-  <div class="card brand-card premium" style="--c:var(--accent)">
-    <div class="logo-wrap"><img src="/static/brand-logos/{{ b.brand }}.avif" alt="{{ b.display_name }} logo" onerror="this.style.display='none'"/></div>
-    <div style="flex:1">
-      <div class="bc-name">{{ b.display_name }}</div>
-      <div style="display:flex;align-items:baseline;gap:7px;margin-top:3px">
-        <span class="num sm" style="color:{{ 'var(--bad)' if b.active_flags>5 else ('var(--warn)' if b.active_flags>0 else 'var(--muted)') }}">{{ b.active_flags }}</span>
-        <span class="muted">active flag{{ '' if b.active_flags==1 else 's' }}</span>
+  {% set fc = 'var(--bad)' if b.active_flags>0 else 'var(--good)' %}
+  <div class="card card-hover" style="padding:0;overflow:hidden;border-top:2px solid {{ fc }}">
+    <div class="logo-plate" style="height:96px;position:relative">
+      <img src="/static/brand-logos/{{ b.brand }}.avif" alt="{{ b.display_name }} logo" style="max-height:56px;max-width:70%" onerror="this.style.display='none'"/>
+      {% if b.latest_plan %}<span class="badge-base badge-muted mono" style="position:absolute;top:10px;right:10px;background:rgba(0,0,0,.75);color:var(--ink);border-color:rgba(255,255,255,.15)">#{{ b.latest_plan }}</span>{% endif %}
+    </div>
+    <div style="padding:18px 20px">
+      <h3 style="margin:0 0 8px;font-size:18px">{{ b.display_name }}</h3>
+      <div style="display:flex;align-items:baseline;gap:7px">
+        <span class="mono" style="font-weight:800;font-size:22px;color:{{ fc }}">{{ b.active_flags }}</span>
+        <span class="kpi-label">active flag{{ '' if b.active_flags==1 else 's' }}</span>
       </div>
-      <div class="foot" style="margin-top:7px">
-        {% if b.latest_plan %}Latest <a href="/plans/{{ b.latest_plan }}">#{{ b.latest_plan }}</a>
-          · <span class="status-{{ b.latest_status }}">{{ b.latest_status }}</span>{% else %}<span class="muted">no plan yet</span>{% endif %}
+      <div style="display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);margin-top:14px;padding-top:14px">
+        {% if b.latest_plan %}<span class="kpi-label status-{{ b.latest_status }}">● {{ b.latest_status }}</span>
+        <a href="/plans/{{ b.latest_plan }}" class="kpi-label" style="color:var(--accent)">Manage →</a>
+        {% else %}<span class="kpi-label">no plan yet</span>{% endif %}
       </div>
     </div>
   </div>
@@ -101,47 +154,56 @@
 </div>
 {% endif %}
 
-<div class="grid rise rise-4" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
+<!-- ============ EXECUTION LEDGER + CYCLE ============ -->
+<div class="grid rise rise-5" style="grid-template-columns:minmax(0,2fr) minmax(280px,1fr)">
   <div class="panel" style="margin:0">
-    <h3>Recent plans</h3>
-    <table>
-      <tr><th>#</th><th>Brand</th><th>Status</th><th>Items</th><th>Progress</th></tr>
+    <h3><span class="rule-gold"></span>Execution ledger <span class="hint">last {{ plans[:8]|length }} plans</span></h3>
+    <table class="sortable">
+      <thead><tr><th data-k>Plan</th><th data-k>Brand</th><th data-k>Status</th><th data-k class="num">Items</th><th data-k class="num">Progress</th></tr></thead>
+      <tbody>
       {% for p in plans[:8] %}
+      {% set total = p['items']|length %}
+      {% set done = p.status_counts.get('done', 0) %}
+      {% set pct = ((done / total * 100)|round|int) if total else 0 %}
       <tr>
-        <td><a href="/plans/{{ p.id }}">{{ p.id }}</a></td>
-        <td>{{ p.brand }}</td>
-        <td class="status-{{ p.status }}">{{ p.status }}</td>
-        <td>{{ p['items']|length }}</td>
-        <td>
-          {% set c = p.status_counts %}
-          {% if c.get('done') %}<span class="badge ok">done {{ c['done'] }}</span> {% endif %}
-          {% if c.get('approved') %}<span class="badge accent">approved {{ c['approved'] }}</span> {% endif %}
-          {% if c.get('proposed') %}<span class="badge muted">proposed {{ c['proposed'] }}</span> {% endif %}
-          {% if c.get('failed') %}<span class="badge live">failed {{ c['failed'] }}</span>{% endif %}
+        <td><a href="/plans/{{ p.id }}" class="mono" style="color:var(--accent-2);font-weight:700">PLN-{{ p.id }}</a></td>
+        <td style="font-weight:600">{{ p.brand }}</td>
+        <td data-v="{{ p.status }}"><span class="badge-base {{ 'badge-ok' if p.status in ('done','approved') else ('badge-live' if p.status in ('failed','rejected') else ('badge-dry' if p.status=='dispatched' else 'badge-accent')) }}">{{ p.status }}</span></td>
+        <td class="num">{{ total }}</td>
+        <td class="num" data-v="{{ pct }}">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span class="bar" style="flex:1;height:3px"><span style="width:{{ pct }}%;background:{{ 'var(--good)' if pct==100 else ('var(--accent)' if pct>=50 else 'var(--warn)') }}"></span></span>
+            <span class="mono" style="font-size:10px;color:var(--muted);width:34px;text-align:right">{{ pct }}%</span>
+          </div>
         </td>
       </tr>
       {% else %}<tr><td colspan="5" class="muted">No plans yet — run a morning cycle.</td></tr>{% endfor %}
+      </tbody>
     </table>
   </div>
 
   <div class="panel" style="margin:0">
-    <h3>Morning cycle</h3>
-    <p class="muted" style="margin-top:0;font-size:13px">Observe all agents → synthesize a draft plan. Nothing dispatches without approval.</p>
-    <form method="post" action="/cycle" style="display:flex;gap:8px">
-      <select name="brand" style="flex:1">
-        {% for b in brands %}<option value="{{ b }}">{{ b }}</option>{% endfor %}
-        <option value="all">all brands</option>
-      </select>
-      <button type="submit">Run cycle</button>
-    </form>
-    <div style="margin-top:16px;border-top:1px solid var(--line);padding-top:14px">
-      <div class="muted" style="font-size:12px;line-height:1.9">
-        <div>◑ <a href="/agents">Agents</a> — 6 workers + orchestrator</div>
-        <div>▤ <a href="/systems">Systems</a> — wrapped integrations</div>
-        <div>➤ <a href="/distribution">Distribution</a> — artifacts for review</div>
-        <div>⛨ <a href="/governor">Governor</a> — caps &amp; safety</div>
-      </div>
+    <h3><span class="rule-gold"></span>Quick links</h3>
+    <div class="muted" style="font-size:13px;line-height:2.1">
+      <div>◑ <a href="/agents">Agents</a> — 6 workers + orchestrator</div>
+      <div>▤ <a href="/systems">Systems</a> — wrapped integrations</div>
+      <div>◎ <a href="/trends">Trend Radar</a> — competitor trends</div>
+      <div>➤ <a href="/distribution">Distribution</a> — artifacts for review</div>
+      <div>⛨ <a href="/governor">Governor</a> — caps &amp; safety</div>
+      <div>◔ <a href="/activity">Activity</a> — live event stream</div>
     </div>
   </div>
 </div>
+
+<script>
+  // deterministic per-agent sparkline heights (decorative, seeded by key)
+  document.querySelectorAll('.spark[data-seed]').forEach(function (el) {
+    var seed = 0, k = el.getAttribute('data-seed');
+    for (var i = 0; i < k.length; i++) seed += k.charCodeAt(i);
+    el.querySelectorAll('span').forEach(function (bar, i) {
+      var v = Math.sin(seed + i * 1.3) * 0.5 + 0.5;
+      bar.style.height = Math.max((0.25 + v * 0.75) * 100, 12) + '%';
+    });
+  });
+</script>
 {% endblock %}

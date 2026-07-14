@@ -6,14 +6,45 @@
 {% for q, status, note in decisions %}{% if status != 'default' %}{% set ns.open = ns.open + 1 %}{% endif %}{% endfor %}
 {% set pct = ((connected / total * 100) if total else 0) | round(1) %}
 
-<div class="phero rise" style="--ph:#5b9dff">
-  <h2>
+<style>
+  .sysmatrix { display:grid; grid-template-columns:repeat(auto-fill,minmax(258px,1fr)); gap:14px; }
+  .sm-card { position:relative; background:var(--surface); border:1px solid var(--line-2);
+    border-radius:var(--radius-lg); padding:14px; overflow:hidden; display:flex; flex-direction:column; gap:12px; }
+  .sm-card::before { content:""; position:absolute; top:0; left:0; right:0; height:2px; background:var(--hc); }
+  .sm-top { display:flex; align-items:center; gap:10px; }
+  .sm-logo { position:relative; width:36px; height:36px; border-radius:50%; flex-shrink:0; display:grid; place-items:center; }
+  .sm-logo img { position:absolute; inset:0; margin:auto; width:22px; height:22px; }
+  .sm-mono { font-family:var(--font-mono); font-weight:700; color:#222; font-size:11px; }
+  .sm-id { min-width:0; flex:1; }
+  .sm-cat { font-size:9px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+  .sm-name { font-weight:700; font-size:14px; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sm-health { flex-shrink:0; font-size:10px; text-transform:uppercase; letter-spacing:.06em; font-weight:700; }
+  .sm-usage-top { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+  .sm-pct { font-family:var(--font-mono); font-size:11px; font-weight:700; color:var(--ink-2); }
+  .sm-bar { height:3px; border-radius:999px; background:rgba(255,255,255,.07); overflow:hidden; }
+  .sm-bar span { display:block; height:100%; border-radius:999px; background:var(--hc); }
+  .sm-detail { font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:7px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sm-foot { display:flex; gap:10px; border-top:1px solid var(--line); padding-top:10px; margin-top:auto; }
+  .sm-foot > div { flex:1; }
+  .sm-metric { font-family:var(--font-mono); font-weight:700; font-size:14px; color:var(--ink); margin-top:2px; }
+</style>
+
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Integrations</span>
+  <h2 style="margin-top:12px">
     <span class="ph-icon">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>
     </span>
     Systems
   </h2>
   <div class="ph-sub">Integration map — wrap, don't rebuild; every integration goes through an audited adapter</div>
+  <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
+    {% if health.healthy %}<span class="badge ok">{{ health.healthy }} healthy</span>{% endif %}
+    {% if health.degraded %}<span class="badge dry">{{ health.degraded }} degraded</span>{% endif %}
+    {% if health.down %}<span class="badge bad">{{ health.down }} down</span>{% endif %}
+    {% if health.idle %}<span class="badge muted">{{ health.idle }} idle</span>{% endif %}
+  </div>
   <div class="ph-stats">
     <span class="pillx">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -44,6 +75,56 @@
   </div>
 </div>
 
+{# ---- System matrix: every system as a usage + health card (all real data) ---- #}
+{% set HC = {'healthy':'var(--good)','degraded':'var(--warn)','down':'var(--bad)','idle':'var(--muted)'} %}
+{% set HB = {'healthy':'ok','degraded':'dry','down':'bad','idle':'muted'} %}
+<div class="rise rise-2" style="display:flex;align-items:center;gap:8px;margin:24px 2px 14px">
+  <span style="width:3px;height:15px;background:var(--accent);border-radius:2px"></span>
+  <span style="font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--accent)">System matrix</span>
+</div>
+<div class="sysmatrix rise rise-2">
+  {% for g in groups %}{% for c in g.systems %}
+  <div class="sm-card" style="--hc:{{ HC[c.health] }}">
+    <div class="sm-top">
+      {% set lu = logo_url(c.domain) if c.domain else None %}
+      <span class="logo-plate sm-logo">
+        <span class="sm-mono">{{ c.name[:2]|upper }}</span>
+        {% if lu %}<img src="{{ lu }}" alt="" onerror="this.remove()"/>{% endif %}
+      </span>
+      <div class="sm-id">
+        <div class="sm-cat">{{ c.category }}</div>
+        <div class="sm-name" title="{{ c.name }}">{{ c.name }}</div>
+      </div>
+      <span class="badge {{ HB[c.health] }} sm-health">{{ c.health }}</span>
+    </div>
+    <div>
+      <div class="sm-usage-top">
+        <span class="kpi-label">{{ 'Cap usage' if c.cap else 'Usage' }}</span>
+        {% if c.cap %}<span class="sm-pct">{{ c.cap.pct }}%</span>{% endif %}
+      </div>
+      <div class="sm-bar"><span style="width:{{ c.cap.pct if c.cap else 0 }}%"></span></div>
+      <div class="sm-detail">
+        {%- if c.cap %}{{ c.cap.detail }}
+        {%- elif c.status == 'offline' %}unreachable · {{ c.note }}
+        {%- elif c.status == 'missing' %}not configured
+        {%- elif c.calls_24h %}{{ c.calls_24h }} calls · 24h
+        {%- else %}no calls · 24h{% endif %}
+      </div>
+    </div>
+    <div class="sm-foot">
+      <div>
+        <div class="kpi-label">Success · 24h</div>
+        <div class="sm-metric">{% if c.success_pct is not none %}{{ c.success_pct }}%{% else %}—{% endif %}</div>
+      </div>
+      <div>
+        <div class="kpi-label">Errors · 24h</div>
+        <div class="sm-metric" style="color:{{ 'var(--bad)' if c.errors_24h else 'var(--ink)' }}">{{ c.errors_24h }}</div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}{% endfor %}
+</div>
+
 {% for g in groups %}
 {% set cfg = g.systems | selectattr('configured') | list | length %}
 <div class="panel rise rise-{{ loop.cycle('2','3','4') }}">
@@ -71,9 +152,11 @@
       <td><span class="badge {{ 'live' if 'action' in s.access or 'send' in s.access else 'muted' }}">{{ s.access }}</span></td>
       <td class="muted" style="font-size:13px">{{ s.uses }}</td>
       <td>
-        {% if not s.configured %}<span class="badge muted">not configured</span>
-        {% elif s.probed %}<span class="badge ok"><span class="pulse" style="width:7px;height:7px;margin-right:6px"></span>connected</span>
-        {% else %}<span class="badge accent">configured</span>{% if s.note %}<div class="muted" style="font-size:11px;margin-top:4px;word-break:break-all">{{ s.note }}</div>{% endif %}{% endif %}
+        {% if s.status == 'online' %}<span class="badge ok"><span class="pulse" style="width:7px;height:7px;margin-right:6px"></span>online</span>
+        {% elif s.status == 'offline' %}<span class="badge bad">offline</span>
+        {% elif s.status == 'configured' %}<span class="badge accent">configured</span>
+        {% else %}<span class="badge muted">not configured</span>{% endif %}
+        {% if s.note %}<div class="muted" style="font-size:11px;margin-top:4px;word-break:break-all">{{ s.note }}</div>{% endif %}
       </td>
     </tr>
     {% endfor %}

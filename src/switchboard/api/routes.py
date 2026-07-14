@@ -8,7 +8,9 @@ exposes spend-vs-caps, a memory browser, and the tool-call audit.
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import time
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -202,6 +204,8 @@ async def home(request: Request):
         stats = await _home_stats(ctx, plans)
         fleet = await _agents_overview(ctx)
         spend = await _spend_snapshot(ctx)
+        deltas = await _spend_deltas(ctx, spend)
+        resources = await _resource_usage(ctx, spend, deltas)
     now = datetime.now()
     greeting = "Good morning" if now.hour < 12 else ("Good afternoon" if now.hour < 18 else "Good evening")
     first = (user.get("name") or user.get("email", "")).split("@")[0].split(".")[0].title()
@@ -224,7 +228,8 @@ async def home(request: Request):
         request, "plans.html",
         {"user": user, "plans": plans, "brands": list(settings.brand_keys),
          "kill_switch": settings.kill_switch, "portfolio": portfolio, "stats": stats, "fleet": fleet,
-         "hero": hero, "gauges": gauges, "fleet_max": fleet_max, "caps_enabled": caps.enabled},
+         "hero": hero, "gauges": gauges, "fleet_max": fleet_max, "caps_enabled": caps.enabled,
+         "deltas": deltas, "resources": resources},
     )
 
 
@@ -492,6 +497,36 @@ TYPE_COLORS = {"metric": "#5b9dff", "flag": "#d6a021", "fact": "#3fb950", "claim
 # Make the color lookups available to every template.
 templates.env.globals["agent_color"] = lambda k: AGENT_COLORS.get(k, "#6f7887")
 templates.env.globals["type_color"] = lambda t: TYPE_COLORS.get(t, "#6f7887")
+# Service logo via logo.dev (needs a publishable token); "" → template shows a monogram.
+templates.env.globals["logo_url"] = lambda domain: (
+    f"https://img.logo.dev/{domain}?token={get_settings().logo_dev_token}&size=64&format=png&retina=true"
+    if get_settings().logo_dev_token and domain else ""
+)
+
+# OEM (automaker) → domain for logo.dev, keyed lowercase to match the detector's
+# lowercased OEM names (switchboard.trends.detector). Covers the detector brand list.
+_OEM_DOMAINS: dict[str, str] = {
+    "acura": "acura.com", "alfa romeo": "alfaromeo.com", "aston martin": "astonmartin.com",
+    "audi": "audi.com", "bentley": "bentleymotors.com", "bmw": "bmw.com", "bugatti": "bugatti.com",
+    "buick": "buick.com", "byd": "byd.com", "cadillac": "cadillac.com", "chevrolet": "chevrolet.com",
+    "chevy": "chevrolet.com", "chrysler": "chrysler.com", "citroen": "citroen.com", "dodge": "dodge.com",
+    "ducati": "ducati.com", "ferrari": "ferrari.com", "fiat": "fiat.com", "fisker": "fiskerinc.com",
+    "ford": "ford.com", "genesis": "genesis.com", "gm": "gm.com", "gmc": "gmc.com",
+    "harley-davidson": "harley-davidson.com", "honda": "honda.com", "hyundai": "hyundai.com",
+    "infiniti": "infinitiusa.com", "jaguar": "jaguar.com", "jeep": "jeep.com", "kia": "kia.com",
+    "koenigsegg": "koenigsegg.com", "lamborghini": "lamborghini.com", "land rover": "landrover.com",
+    "lexus": "lexus.com", "lincoln": "lincoln.com", "lotus": "lotuscars.com", "lucid": "lucidmotors.com",
+    "maserati": "maserati.com", "mazda": "mazda.com", "mclaren": "mclaren.com",
+    "mercedes": "mercedes-benz.com", "mini": "mini.com", "mitsubishi": "mitsubishicars.com",
+    "nio": "nio.com", "nissan": "nissanusa.com", "pagani": "pagani.com", "peugeot": "peugeot.com",
+    "polestar": "polestar.com", "porsche": "porsche.com", "ram": "ramtrucks.com", "renault": "renault.com",
+    "rimac": "rimac-automobili.com", "rivian": "rivian.com", "rolls-royce": "rolls-roycemotorcars.com",
+    "scout": "scoutmotors.com", "skoda": "skoda-auto.com", "stellantis": "stellantis.com",
+    "subaru": "subaru.com", "suzuki": "suzuki.com", "tesla": "tesla.com", "toyota": "toyota.com",
+    "vinfast": "vinfastauto.com", "volkswagen": "vw.com", "volvo": "volvocars.com",
+    "xiaomi": "xiaomi.com", "yamaha": "yamaha-motor.com",
+}
+templates.env.globals["oem_domain"] = lambda name: _OEM_DOMAINS.get((name or "").strip().lower(), "")
 
 FEEDER_META = [
     {"key": "decay_scan", "display": "Ranking-decay scan",
@@ -514,6 +549,11 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
         select(ToolCallLog.agent, func.count(), func.max(ToolCallLog.created_at)).group_by(ToolCallLog.agent)
     )).all()
     calls = {a: (int(c), ts) for a, c, ts in call_rows}
+    err_rows = (await ctx.session.execute(
+        select(ToolCallLog.agent, func.count()).where(ToolCallLog.ok.is_(False))
+        .group_by(ToolCallLog.agent)
+    )).all()
+    errors = {a: int(c) for a, c in err_rows}
     out = []
     for m in AGENT_META:
         k = m["key"]
@@ -522,7 +562,7 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
             actions = ["notify", *actions]
         c, last = calls.get(k, (0, None))
         out.append({**m, "owns": owned_tool_names(k), "actions": actions, "read_only": not actions,
-                    "entries": mem.get(k, 0), "calls": c,
+                    "entries": mem.get(k, 0), "calls": c, "errors": errors.get(k, 0),
                     "last_active": last.strftime("%m-%d %H:%M") if last else None})
     return out
 
@@ -623,6 +663,7 @@ async def set_role_route(request: Request, email: str = Form(...), role: str = F
 
 # The wrapped systems + external tools (PRD §4). `check` is (kind, key):
 #   cred  -> credentials.describe() presence   env -> a specific env var present
+#   service  -> a base URL that IS live-probed each load (online / offline)
 #   endpoint -> a configured base URL (shown, not probed)   always -> built-in
 SYSTEMS_META: list[dict[str, Any]] = [
     # Warehouse & data
@@ -638,13 +679,13 @@ SYSTEMS_META: list[dict[str, Any]] = [
     ("Trend sourcing", "Firecrawl", "research", "read", "Web search + page extraction for dossiers", ("cred", "firecrawl")),
     ("Trend sourcing", "NewsAPI", "research", "read", "Headline stream for the trend scout", ("cred", "newsapi")),
     # Editorial pipelines
-    ("Editorial pipelines", "Claude Albert", "production", "read + action", "Discover ideation + AI writer + outline reviewer", ("endpoint", "albert")),
-    ("Editorial pipelines", "Seona", "opportunity", "read + action", "SEO ideation + ranking-decay + Update Strategist", ("endpoint", "seona")),
-    ("Editorial pipelines", "HC Viral Hits", "production", "read + action", "Viral ideation + AI writer + Emaki CMS push", ("env", "HC_VIRAL_HITS_API_KEY")),
+    ("Editorial pipelines", "Claude Albert", "production", "read + action", "Discover ideation + AI writer + outline reviewer", ("service", "albert")),
+    ("Editorial pipelines", "Seona", "opportunity", "read + action", "SEO ideation + ranking-decay + Update Strategist", ("service", "seona")),
+    ("Editorial pipelines", "HC Viral Hits", "production", "read + action", "Viral ideation + AI writer + Emaki CMS push", ("service", "hc_viral_hits")),
     ("Editorial pipelines", "Asana", "production", "read + action", "Tasks + outline-approval workflow", ("cred", "asana")),
     ("Editorial pipelines", "Emaki CMS", "production", "action · gated", "Push unpublished article drafts (via HC-Viral)", ("env", "HC_VIRAL_HITS_API_KEY")),
     ("Editorial pipelines", "content-depth-auditor", "analytics", "feeder", "Content-depth findings → memory", ("env", "CONTENT_AUDITOR_URL")),
-    ("Editorial pipelines", "writers-dashboard", "analytics", "read", "Writer-performance metric logic (superseded)", ("endpoint", "writers_dashboard")),
+    ("Editorial pipelines", "writers-dashboard", "analytics", "read", "Writer-performance metric logic (superseded)", ("service", "writers_dashboard")),
     # Distribution
     ("Distribution", "daily-reporting-agent", "reporting", "read + send", "Per-brand editorial email digest", ("cred", "gmail")),
     ("Distribution", "newsletter-creator-auto", "reporting", "action · assemble", "CarBuzz newsletter draft (HTML)", ("env", "NEWSLETTER_API_URL")),
@@ -663,11 +704,22 @@ SYSTEMS_META: list[dict[str, Any]] = [
     ("Substrate & platform", "PostgreSQL", "orchestrator", "memory", "Shared-memory coordination substrate", ("cred", "database_url")),
 ]
 
-CONSOLIDATION = [  # PRD §15 — surfaced, not assumed
-    "Two BigQuery article tables (ODS vs consum) feed different systems for the same brands — pick a canonical source for Analytics or map between them.",
-    "Two ideation + AI-writer pipelines (Claude Albert / HC Viral Hits) draft in parallel with overlapping brands — memory can de-dup topic angles across both.",
-    "Two performance-digest paths (writers-dashboard Slack vs daily-reporting email) compute overlapping per-brand performance daily — share one metric layer.",
-    "Two cost-tracking schemes (Albert cost_micros vs HC-Viral compute_cost_cents) — the governor's spend_ledger should absorb both, not add a third.",
+CONSOLIDATION = [  # PRD §15 — surfaced, not assumed; annotated as decisions land
+    "Two BigQuery article tables (ODS vs consum) feed different systems for the same brands. "
+    "→ Resolved: consum (pubinsights_consum_data) = published performance, ODS (pubinsights_ods_data) "
+    "= Discover; confirmed with Artem — kept separate by purpose.",
+    "Two ideation + AI-writer pipelines (Claude Albert / HC Viral Hits) draft in parallel with "
+    "overlapping brands. → Resolved: de-dup enabled in both Albert and HC Viral Hits.",
+    "Two performance-digest paths (writers-dashboard vs daily-reporting) compute overlapping per-brand "
+    "performance. → Resolved: writers-dashboard tracks writer performance only; daily-reporting-agent "
+    "pulls the top live articles.",
+    "Two cost-tracking schemes (Albert cost_micros vs HC-Viral compute_cost_cents). → Decided: route "
+    "both into the governor's spend_ledger (unit already unified in costs.py); pending a cost/usage "
+    "endpoint from Albert + HC-Viral to read from.",
+    "Two per-brand trend monitors (Switchboard Trend Scout vs HC Viral Hits). → Decided: run both; a "
+    "competitor-trend gets a cross-monitor bonus (+15) when HC-Viral independently landed on the same "
+    "topic. Corroboration reads HC-Viral's ready drafts today; widens to all topics once it exposes "
+    "/api/cms/topics.",
 ]
 
 DECISIONS = [  # PRD §13 — what I defaulted vs. what's still open
@@ -684,25 +736,186 @@ DECISIONS = [  # PRD §13 — what I defaulted vs. what's still open
 ]
 
 
-async def _systems_overview(ctx: RunContext) -> list[dict[str, Any]]:
+# --- live service health probing (Systems page) -----------------------------
+# `service` rows carry a base URL we actually ping on load, so the console can
+# report "online / offline" instead of merely "a URL is configured". Results are
+# cached briefly so refreshes stay snappy and we don't hammer the services.
+_PROBE_TTL_SEC = 20.0
+_PROBE_TIMEOUT_SEC = 1.5
+_probe_cache: dict[str, tuple[float, bool]] = {}
+
+
+async def _probe_one(url: str) -> bool:
+    """True if the service answers *any* HTTP response (even 4xx/5xx) within the
+    timeout — that means it is up. Refused / timeout / DNS failure → offline."""
+    try:
+        import httpx
+    except ImportError:  # httpx is an adapter extra; degrade to "can't confirm"
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_SEC, follow_redirects=False) as client:
+            await client.get(url)
+        return True
+    except Exception:  # noqa: BLE001 — any transport error means unreachable
+        return False
+
+
+async def _probe_services(urls: dict[str, str]) -> dict[str, bool]:
+    """Probe ``{endpoint_key: url}`` concurrently, honouring a short TTL cache."""
+    now = time.monotonic()
+    result: dict[str, bool] = {}
+    todo: dict[str, str] = {}
+    for key, url in urls.items():
+        cached = _probe_cache.get(key)
+        if cached and (now - cached[0]) < _PROBE_TTL_SEC:
+            result[key] = cached[1]
+        else:
+            todo[key] = url
+    if todo:
+        probed = await asyncio.gather(*(_probe_one(u) for u in todo.values()))
+        for key, ok in zip(todo.keys(), probed):
+            _probe_cache[key] = (now, ok)
+            result[key] = ok
+    return result
+
+
+# System name -> logo.dev domain (absent -> a 2-letter monogram is shown). Internal
+# Valnet agents/services have no public domain and fall back to the monogram.
+_SYSTEM_DOMAINS: dict[str, str] = {
+    "BigQuery": "cloud.google.com", "Google Sheets": "google.com", "GSC exports": "google.com",
+    "Ahrefs": "ahrefs.com", "Similarweb": "similarweb.com",
+    "Tavily": "tavily.com", "Perplexity": "perplexity.ai", "Firecrawl": "firecrawl.dev",
+    "NewsAPI": "newsapi.org", "Asana": "asana.com", "Gmail API": "google.com",
+    "Google Ads": "google.com", "Meta Ads": "meta.com", "Bing Ads": "bing.com",
+    "Anthropic (Claude)": "anthropic.com", "Slack": "slack.com", "Google OAuth": "google.com",
+    "PostgreSQL": "postgresql.org",
+}
+
+# System name -> the tool_call_log.tool names that represent it, for real 24h
+# volume / errors / success. Systems absent here have no mapped tools and read
+# "idle" (no usage) — honest for a low-traffic surface.
+_SYSTEM_TOOLS: dict[str, list[str]] = {
+    "BigQuery": ["bigquery_consum", "bigquery_discover"],
+    "Sentinel Pro": ["sentinel_traffic"],
+    "Google Sheets": ["sheets_quota"],
+    "Ahrefs": ["ahrefs_keywords", "ahrefs_serp", "ahrefs_backlinks"],
+    "Similarweb": ["similarweb_traffic"],
+    "Tavily": ["tavily_trends", "tavily_deep_search"],
+    "Perplexity": ["perplexity_trends"],
+    "Firecrawl": ["firecrawl_trends", "firecrawl_scrape"],
+    "NewsAPI": ["newsapi_trends"],
+}
+
+# System name -> metered spend metric, for the real cap-usage bar (spend_ledger).
+_SYSTEM_METRIC: dict[str, str] = {
+    "Anthropic (Claude)": "llm_micros", "BigQuery": "bq_bytes", "Ahrefs": "ahrefs_units",
+}
+
+
+def _fmt_bytes(n: int) -> str:
+    n = float(int(n or 0))
+    for unit, size in (("GiB", 1073741824), ("MiB", 1048576), ("KiB", 1024)):
+        if n >= size:
+            v = n / size
+            return f"{v:.1f} {unit}" if v < 100 else f"{v:.0f} {unit}"
+    return f"{int(n)} B"
+
+
+async def _system_matrix(ctx: RunContext) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Per-system usage + health, all real: reachability from the live service
+    probe, cap usage from spend_ledger (LLM/BigQuery/Ahrefs), and 24h volume /
+    errors / success from the tool_call_log audit trail. Returns the systems
+    grouped by category plus a health tally for the hero."""
+    from datetime import datetime as _dt, timedelta, timezone as _tz
+
     creds = ctx.creds
     present = creds.describe()
+    endpoints = ctx.settings.endpoints
+
+    # Live-probe every service row that actually has a URL, concurrently.
+    service_urls = {
+        key: endpoints[key]
+        for _c, _n, _o, _a, _u, (kind, key) in SYSTEMS_META
+        if kind == "service" and endpoints.get(key)
+    }
+    reachable = await _probe_services(service_urls) if service_urls else {}
+
+    # One pass over the last 24h of tool calls, grouped by tool.
+    since = _dt.now(_tz.utc) - timedelta(hours=24)
+    agg_rows = (await ctx.session.execute(
+        select(ToolCallLog.tool, func.count(),
+               func.sum(case((ToolCallLog.ok.is_(True), 1), else_=0)),
+               func.sum(case((ToolCallLog.ok.is_(False), 1), else_=0)))
+        .where(ToolCallLog.created_at >= since).group_by(ToolCallLog.tool)
+    )).all()
+    tool_agg = {t: (int(c), int(o or 0), int(e or 0)) for t, c, o, e in agg_rows}
+
+    spend = await _spend_snapshot(ctx)
+
+    def _cap_for(metric: str) -> dict[str, Any] | None:
+        s = spend.get(metric)
+        if not s or s.get("cap_per_day") is None:
+            return None
+        spent, cap = s["spent_today"], s["cap_per_day"]
+        if metric == "llm_micros":
+            detail = f"${spent/1e6:.2f} / ${cap/1e6:.2f}"
+        elif metric == "bq_bytes":
+            detail = f"{_fmt_bytes(spent)} / {_fmt_bytes(cap)}"
+        else:
+            detail = f"{spent:,} / {cap:,} units"
+        return {"pct": round(100 * spent / cap, 1) if cap else 0.0, "detail": detail}
+
+    counts = {"healthy": 0, "degraded": 0, "down": 0, "idle": 0}
     grouped: dict[str, list[dict[str, Any]]] = {}
     for category, name, owner, access, uses, check in SYSTEMS_META:
         kind, key = check
-        if kind == "cred":
-            configured, note = present.get(key, False), None
+        note: str | None = None
+        # status ∈ {online, offline, configured, missing}; summary counts treat
+        # everything except "missing" as configured (offline = set up but down).
+        if kind == "service":
+            note = endpoints.get(key)
+            status = "missing" if not note else ("online" if reachable.get(key) else "offline")
+        elif kind == "cred":
+            status = "configured" if present.get(key, False) else "missing"
         elif kind == "env":
-            configured, note = creds.has(key), None
+            status = "configured" if creds.has(key) else "missing"
         elif kind == "endpoint":
-            configured, note = True, ctx.settings.endpoints.get(key)
+            note = endpoints.get(key)
+            status = "configured" if note else "missing"
+        else:  # always
+            status = "configured"
+
+        calls = ok = err = 0
+        for tname in _SYSTEM_TOOLS.get(name, []):
+            c, o, e = tool_agg.get(tname, (0, 0, 0))
+            calls, ok, err = calls + c, ok + o, err + e
+        success = round(100 * ok / calls) if calls else None
+
+        cap = _cap_for(_SYSTEM_METRIC[name]) if name in _SYSTEM_METRIC else None
+        cappct = cap["pct"] if cap else None
+
+        # Health: missing config takes precedence (idle); an offline service or a
+        # blown cap is down; recent errors or a near-cap read as degraded.
+        if status == "offline":
+            health = "down"
+        elif status == "missing":
+            health = "idle"
+        elif cappct is not None and cappct >= 100:
+            health = "down"
+        elif err > 0 or (cappct is not None and cappct >= 80):
+            health = "degraded"
         else:
-            configured, note = True, None
+            health = "healthy"
+        counts[health] += 1
+
         grouped.setdefault(category, []).append(
-            {"name": name, "owner": owner, "access": access, "uses": uses,
-             "configured": configured, "note": note, "probed": kind != "endpoint"}
+            {"name": name, "category": category, "owner": owner, "access": access, "uses": uses,
+             "status": status, "configured": status != "missing", "note": note,
+             "domain": _SYSTEM_DOMAINS.get(name), "health": health, "cap": cap,
+             "calls_24h": calls, "errors_24h": err, "success_pct": success}
         )
-    return [{"category": c, "systems": s} for c, s in grouped.items()]
+    matrix = [{"category": c, "systems": s} for c, s in grouped.items()]
+    return matrix, counts
 
 
 @router.get("/systems", response_class=HTMLResponse)
@@ -711,13 +924,13 @@ async def systems_page(request: Request):
     if not user:
         return RedirectResponse("/auth/login", status_code=302)
     async with RunContext.open() as ctx:
-        groups = await _systems_overview(ctx)
+        groups, health = await _system_matrix(ctx)
         total = sum(len(g["systems"]) for g in groups)
         connected = sum(1 for g in groups for s in g["systems"] if s["configured"])
     return templates.TemplateResponse(request, "systems.html",
                                       {"user": user, "groups": groups, "total": total,
-                                       "connected": connected, "consolidation": CONSOLIDATION,
-                                       "decisions": DECISIONS})
+                                       "connected": connected, "health": health,
+                                       "consolidation": CONSOLIDATION, "decisions": DECISIONS})
 
 
 @router.get("/distribution", response_class=HTMLResponse)
@@ -877,6 +1090,7 @@ async def trends_page(request: Request, brand: str | None = None, scanning: str 
             statuses=["dismissed", "declined", "expired", "completed"], limit=15)]
         pipelines = [_pipeline_dict(p, with_jobs=False)
                      for p in await PipelineRepo(ctx.session).list(brand=brand or None, limit=40)]
+        coverage = await _brand_coverage(ctx, list(settings.brand_keys))
     # Approvability is per row — a brand_user may approve their brand's rows on
     # an unfiltered (portfolio-wide) page.
     for row in (*open_trends, *recent_closed, *pipelines):
@@ -893,10 +1107,37 @@ async def trends_page(request: Request, brand: str | None = None, scanning: str 
         request, "trends.html",
         {"user": user, "trends": open_trends, "closed": recent_closed, "pending": pending,
          "pipelines": pipelines[:20], "stats": stats, "brands": list(settings.brand_keys),
-         "content_types": list(CONTENT_TYPES),
+         "content_types": list(CONTENT_TYPES), "coverage": coverage,
          "kill_switch": settings.kill_switch, "trend_cfg": settings.trends,
          "scanning": scanning == "1", "f": {"brand": brand or ""}},
     )
+
+
+async def _brand_coverage(ctx: RunContext, brand_keys: list[str]) -> list[dict[str, Any]]:
+    """Per-brand coverage scorecard from the trend table (Lovable's brandCoverage).
+    Score = % of open trends we've covered; no day-delta (no history kept)."""
+    settings = get_settings()
+    open_st = ["detected", "dossier_building", "proposed", "approved"]
+    out = []
+    for b in brand_keys:
+        async def _c(*conds):
+            return int((await ctx.session.execute(
+                select(func.count()).select_from(Trend).where(*conds))).scalar_one())
+        covered = await _c(Trend.brand == b, Trend.covered_by_us.is_(True), Trend.status.in_(open_st))
+        gaps = await _c(Trend.brand == b, Trend.covered_by_us.is_(False), Trend.status.in_(open_st))
+        pending = int((await ctx.session.execute(
+            select(func.count()).select_from(ContentPipeline)
+            .where(ContentPipeline.brand == b, ContentPipeline.status == "pending_approval")
+        )).scalar_one())
+        denom = covered + gaps
+        try:
+            display = settings.brand(b).display_name
+        except KeyError:
+            display = b
+        out.append({"brand": b, "display_name": display,
+                    "score": round(100 * covered / denom) if denom else None,
+                    "covered": covered, "gaps": gaps, "pending": pending})
+    return out
 
 
 @router.post("/trends/scan")
@@ -1293,6 +1534,77 @@ async def _spend_snapshot(ctx: RunContext) -> dict[str, Any]:
     return out
 
 
+async def _spend_deltas(ctx: RunContext, spend: dict[str, Any]) -> dict[str, Any]:
+    """Today-vs-yesterday % change per metric, from spend_ledger — real numbers
+    for the dashboard KPI delta chips. pct is None when there's no baseline."""
+    from datetime import date, timedelta
+
+    from ..db.models import SpendLedger
+
+    yesterday = date.today() - timedelta(days=1)
+    rows = (await ctx.session.execute(
+        select(SpendLedger.metric, func.sum(SpendLedger.amount))
+        .where(SpendLedger.window_date == yesterday).group_by(SpendLedger.metric)
+    )).all()
+    prev = {m: int(a or 0) for m, a in rows}
+    out: dict[str, Any] = {}
+    for metric in ("llm_micros", "bq_bytes", "ahrefs_units"):
+        today = spend.get(metric, {}).get("spent_today", 0)
+        y = prev.get(metric, 0)
+        out[metric] = {"prev": y, "pct": round(100 * (today - y) / y, 1) if y else None}
+    return out
+
+
+# Trend-source APIs surfaced on the dashboard, keyed by the exact tool_call_log
+# names each adapter/dossier step logs (BaseAdapter.observe logs tool=<adapter
+# name>; the dossier logs tavily_deep_search). Firecrawl/NewsAPI/Perplexity are
+# still called + audited, just not shown in this curated 7-row panel.
+_API_RESOURCES = [
+    ("Tavily", "tavily.com", ["tavily_trends", "tavily_deep_search"]),
+    ("YouTube", "youtube.com", ["youtube_trends"]),
+    ("X", "x.com", ["x_trends"]),
+    ("Semrush", "semrush.com", ["semrush_trends"]),
+]
+
+
+async def _resource_usage(ctx: RunContext, spend: dict[str, Any],
+                          deltas: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resource-usage rows for the dashboard — all backed by real tracking:
+    LLM/BigQuery/Ahrefs from the spend ledger, and the trend-source APIs counted
+    from the tool_call_log audit trail (today vs yesterday). Each carries a
+    `domain` used to render the service's real logo."""
+    from datetime import datetime as _dt, timedelta, timezone as _tz
+
+    rows: list[dict[str, Any]] = [
+        {"label": "LLM spend", "domain": "anthropic.com",
+         "val": f"${spend['llm_micros']['spent_today']/1e6:.2f}",
+         "prev": f"${deltas['llm_micros']['prev']/1e6:.2f}", "pct": deltas["llm_micros"]["pct"]},
+        {"label": "BigQuery", "domain": "cloud.google.com",
+         "val": f"{spend['bq_bytes']['spent_today']/1048576:.0f} MB",
+         "prev": f"{deltas['bq_bytes']['prev']/1048576:.0f} MB", "pct": deltas["bq_bytes"]["pct"]},
+        {"label": "Ahrefs units", "domain": "ahrefs.com",
+         "val": f"{spend['ahrefs_units']['spent_today']:,}",
+         "prev": f"{deltas['ahrefs_units']['prev']:,}", "pct": deltas["ahrefs_units"]["pct"]},
+    ]
+    now = _dt.now(_tz.utc)
+    today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    yest0 = today0 - timedelta(days=1)
+    for label, domain, tools in _API_RESOURCES:
+        today_n = int((await ctx.session.execute(
+            select(func.count()).select_from(ToolCallLog)
+            .where(ToolCallLog.tool.in_(tools), ToolCallLog.created_at >= today0)
+        )).scalar_one())
+        prev_n = int((await ctx.session.execute(
+            select(func.count()).select_from(ToolCallLog)
+            .where(ToolCallLog.tool.in_(tools),
+                   ToolCallLog.created_at >= yest0, ToolCallLog.created_at < today0)
+        )).scalar_one())
+        rows.append({"label": f"{label} calls", "domain": domain,
+                     "val": f"{today_n:,}", "prev": f"{prev_n:,}",
+                     "pct": round(100 * (today_n - prev_n) / prev_n, 1) if prev_n else None})
+    return rows
+
+
 async def _recent_audit(ctx: RunContext, limit: int) -> list[dict[str, Any]]:
     rows = (await ctx.session.execute(
         select(ToolCallLog).order_by(desc(ToolCallLog.created_at)).limit(limit)
@@ -1410,3 +1722,135 @@ def _csv_response(rows: list[dict[str, Any]], cols: list[str], filename: str) ->
         w.writerow(r)
     return PlainTextResponse(buf.getvalue(), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------------------------------------------------------------------
+# Activity feed + Notifications (real data: tool_call_log, memory flags, jobs)
+# ---------------------------------------------------------------------------
+
+def _ago(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc)
+    d = dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+    secs = max(0, int((now - d).total_seconds()))
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+async def _activity_events(ctx: RunContext, limit: int = 60) -> list[dict[str, Any]]:
+    """Unified chronological event feed from the audit log + shared-memory writes."""
+    events: list[dict[str, Any]] = []
+    tcalls = (await ctx.session.execute(
+        select(ToolCallLog).order_by(desc(ToolCallLog.created_at)).limit(limit)
+    )).scalars().all()
+    for r in tcalls:
+        act = r.action == "act"
+        err = r.ok is False
+        events.append({
+            "ts": r.created_at, "kind": "error" if err else ("dispatch" if act else "tool_call"),
+            "agent": r.agent, "system": r.tool, "brand": r.brand,
+            "severity": "bad" if err else ("good" if act else "info"),
+            "message": f"{r.agent} {'ran' if act else 'called'} {r.tool}"
+                       + ("" if r.ok is None else (" — ok" if r.ok else " — failed"))
+                       + ("" if r.dry_run or not act else " (LIVE)"),
+        })
+    entries = await ctx.store.query(status=None, limit=limit)
+    for e in entries:
+        typ = e.type.value
+        kind = (e.payload or {}).get("kind", "")
+        is_gov = typ == "decision" and str(kind).startswith("spend")
+        events.append({
+            "ts": e.created_at, "kind": "governor" if is_gov else "memory_write",
+            "agent": e.source_agent, "system": e.source_system, "brand": e.brand,
+            "severity": "warn" if typ == "flag" else ("good" if e.verified else "info"),
+            "message": f"{e.source_agent} wrote {typ}" + (f" · {kind}" if kind else ""),
+        })
+    events.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=None), reverse=True)
+    events = events[:limit]
+    for ev in events:
+        ev["ago"] = _ago(ev["ts"])
+        ev["when"] = ev["ts"].strftime("%m-%d %H:%M:%S") if ev["ts"] else ""
+        ev.pop("ts", None)
+    return events
+
+
+async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str, Any]]:
+    """Human-actionable items: active flags, failed content jobs, failed plan items."""
+    out: list[dict[str, Any]] = []
+    flags = await ctx.store.query(types=[EntryType.FLAG], status="active", limit=limit)
+    for f in flags:
+        p = f.payload or {}
+        sev = {"high": "bad", "medium": "warn"}.get(str(p.get("severity", "")), "info")
+        out.append({"ts": f.created_at, "severity": sev,
+                    "title": str(p.get("kind", "flag")).replace("_", " ").title(),
+                    "detail": p.get("headline") or p.get("url") or p.get("note")
+                              or f"{f.source_agent} · {f.brand}", "brand": f.brand})
+    failed_jobs = (await ctx.session.execute(
+        select(ContentJob).where(ContentJob.status == "failed")
+        .order_by(desc(ContentJob.created_at)).limit(limit)
+    )).scalars().all()
+    for j in failed_jobs:
+        out.append({"ts": j.updated_at or j.created_at, "severity": "bad",
+                    "title": f"Content job failed — {j.content_type.replace('_', ' ')}",
+                    "detail": (j.error or "generation failed")[:160],
+                    "brand": j.pipeline.brand if j.pipeline else None})
+    failed_items = (await ctx.session.execute(
+        select(PlanItem).where(PlanItem.status == "failed")
+        .order_by(desc(PlanItem.created_at)).limit(limit)
+    )).scalars().all()
+    for it in failed_items:
+        ref = it.result_ref or {}
+        out.append({"ts": it.created_at, "severity": "bad",
+                    "title": f"Plan item failed — {it.action_type}",
+                    "detail": str(ref.get("refused") or ref.get("error") or "dispatch failed")[:160],
+                    "brand": None})
+    out.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=None), reverse=True)
+    out = out[:limit]
+    for n in out:
+        n["ago"] = _ago(n["ts"])
+        n.pop("ts", None)
+    return out
+
+
+@router.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        events = await _activity_events(ctx, 80)
+    settings = get_settings()
+    return templates.TemplateResponse(request, "activity.html",
+                                      {"user": user, "events": events,
+                                       "kill_switch": settings.kill_switch})
+
+
+@router.get("/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        items = await _notification_items(ctx, 60)
+    settings = get_settings()
+    unread = sum(1 for n in items if n["severity"] in ("bad", "warn"))
+    return templates.TemplateResponse(request, "notifications.html",
+                                      {"user": user, "items": items, "unread": unread,
+                                       "kill_switch": settings.kill_switch})
+
+
+@router.get("/api/nav-badges")
+async def nav_badges(request: Request):
+    """Sidebar badge counts (actionable notifications). Auth-gated; 0 when signed out."""
+    if not current_user(request):
+        return JSONResponse({"notifications": 0})
+    async with RunContext.open() as ctx:
+        items = await _notification_items(ctx, 60)
+    return JSONResponse({"notifications": sum(1 for n in items if n["severity"] in ("bad", "warn"))})

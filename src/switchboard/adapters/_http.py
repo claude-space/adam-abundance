@@ -25,7 +25,8 @@ async def _request(method: str, base: str, path: str, *, json: Any | None = None
 
     url = f"{base.rstrip('/')}{path}"
     last_exc: Exception | None = None
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    # follow_redirects: ShellAgent-hosted agents 308 API paths to a trailing slash.
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 resp = await client.request(method, url, json=json, headers=headers or {}, params=params)

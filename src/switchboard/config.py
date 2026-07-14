@@ -197,6 +197,7 @@ class Settings:
     trends: TrendConfig = field(default_factory=TrendConfig)
     ttls: dict[str, int | None] = field(default_factory=lambda: dict(_DEFAULT_TTLS))
     endpoints: dict[str, str] = field(default_factory=dict)
+    logo_dev_token: str = ""   # logo.dev publishable key (pk_...) for service logos
 
     # -- brands ---------------------------------------------------------------
 
@@ -352,6 +353,7 @@ def get_settings() -> Settings:
         artifacts=artifacts,
         trends=trends,
         endpoints=endpoints,
+        logo_dev_token=creds.resolve("LOGO_DEV_TOKEN", secret=False) or "",
     )
     log.info(
         "Settings loaded: env=%s brands=%s dry_run_default=%s kill_switch=%s credentials_present=%s",
