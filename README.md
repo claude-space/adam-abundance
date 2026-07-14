@@ -66,9 +66,12 @@ src/switchboard/
   adapters/         Integration plane (Phase 1+): one wrapper per existing system
   agents/           The six worker agents (Phase 2+)
   orchestrator/     Morning cycle: plan → approve → dispatch (Phase 3+)
+  trends/           Competitor trend pipeline: scout → approval → generation →
+                    preview review → gated publish (docs/trend-pipeline.md)
   api/              FastAPI approval surface + observability (Phase 3+)
 migrations/         Alembic (async) — 0001_initial matches the PRD DDL
 docs/               INTEGRATION-NOTES.md — how each wrapped system actually works
+                    trend-pipeline.md — the competitor-trend pipeline reference
 ```
 
 ## Running it locally
@@ -92,7 +95,23 @@ switchboard selfcheck                  # config + redaction + dummy write/read +
 
 Other commands: `switchboard sweep` (TTL sweep), `switchboard observe <agent>
 <brand>` (Phase 2+), `switchboard cycle <brand>` (Phase 3+), `switchboard serve`
-(approval UI/API, Phase 3+).
+(approval UI/API, Phase 3+), `switchboard trend-scan [brand]` (one competitor
+trend scan), `switchboard pipeline-worker` (process queued content jobs once).
+
+## Competitor trend pipeline
+
+The event-driven counterpart to the morning cycle (full reference:
+[`docs/trend-pipeline.md`](docs/trend-pipeline.md)). The **Trend Scout** clusters
+competitor coverage (RSS) plus Tavily / Perplexity / Firecrawl / NewsAPI signals
+into scored trends, builds a research dossier (key facts go through the existing
+fact-gate as claims), and files a **pipeline trigger request** — notified to
+Slack when wired, decided by a human on **/trends**. On approval it generates
+per-content-type previews (built-in governed LLM by default; HC-Viral /
+social / newsletter / generic ShellAgent `/run` transports optional), which the
+editor **accepts, regenerates with instructions, or rejects** on
+**/pipelines/{id}**. "Publish" stays inside the existing guardrails: the
+sanctioned Emaki *unpublished-draft* push or an explicit manual hand-off —
+never an autonomous post. Kill switch + LLM spend caps apply to every step.
 
 ## Build status (phased — PRD §12)
 

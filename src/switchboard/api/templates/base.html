@@ -136,6 +136,15 @@
     .status-done{color:var(--good)} .status-failed{color:var(--bad)} .status-dispatched{color:var(--warn)}
     .status-draft{color:var(--ink-2)} .status-active{color:var(--good)} .status-expired{color:var(--muted)}
     .status-superseded{color:var(--muted)}
+    /* trend pipeline lifecycles (docs/trend-pipeline.md) */
+    .status-detected{color:var(--ink-2)} .status-dossier_building{color:var(--warn)}
+    .status-pending_approval{color:var(--warn)} .status-generating{color:var(--warn)}
+    .status-previews_ready{color:var(--accent)} .status-published{color:var(--good)}
+    .status-partially_published{color:var(--good)} .status-declined{color:var(--bad)}
+    .status-closed{color:var(--muted)} .status-dismissed{color:var(--muted)}
+    .status-completed{color:var(--good)} .status-queued{color:var(--muted)}
+    .status-running{color:var(--warn)} .status-preview_ready{color:var(--accent)}
+    .status-cancelled{color:var(--muted)}
 
     button, input[type=submit] { background:var(--accent); color:#05132e; border:0; padding:8px 15px;
              border-radius:var(--radius-sm); font-weight:600; cursor:pointer; font-size:13px; }
@@ -290,6 +299,12 @@
         <a href="/systems" data-path="/systems">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><line x1="7" y1="7" x2="7.01" y2="7"/><line x1="7" y1="17" x2="7.01" y2="17"/></svg>
           Systems</a>
+        <a href="/trends" data-path="/trends">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+          Trend Radar</a>
+        <a href="/pipelines" data-path="/pipelines">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="6" r="2.5"/><circle cx="12" cy="18" r="2.5"/><path d="M7.5 6h9M6.2 8.2 10.8 16M17.8 8.2 13.2 16"/></svg>
+          Pipelines</a>
         <a href="/distribution" data-path="/distribution">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
           Distribution</a>

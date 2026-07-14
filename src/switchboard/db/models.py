@@ -1,10 +1,13 @@
 """Shared-memory ORM models — the reference DDL from PRD §7.2 / §7.3.
 
-Five tables:
+Core tables:
   * ``memory_entry``   — the heart of the system; typed, provenance-carrying,
                          brand-scoped, TTL-bearing entries every agent reads/writes.
   * ``plan`` / ``plan_item`` — the orchestrator's daily plan + its ranked items,
                          carrying the human-approval fields the governor enforces.
+  * ``trend`` / ``content_pipeline`` / ``content_job`` — the competitor-trend
+                         pipeline: clustered trends, human-gated trigger requests,
+                         and per-content-type generation jobs (docs/trend-pipeline.md).
   * ``tool_call_log``  — per external tool call: provenance + spend (mirrors
                          Seona's AgentUsage / HC-Viral's AgentEvent).
   * ``spend_ledger``   — rolling spend the governor's caps read from.
@@ -133,6 +136,134 @@ class PlanItem(Base):
         return (
             f"<PlanItem id={self.id} rank={self.rank} action={self.action_type} "
             f"agent={self.assigned_agent} status={self.status} dry_run={self.dry_run}>"
+        )
+
+
+class Trend(Base):
+    """One clustered competitor story/topic (docs/trend-pipeline.md). Raw
+    signals live in ``memory_entry`` (kind='trend_signals'); this row is the
+    deduped, scored, lifecycle-bearing cluster the humans act on."""
+
+    __tablename__ = "trend"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)  # hotcars|carbuzz|topspeed|portfolio
+    cluster_key: Mapped[str] = mapped_column(Text, nullable=False)  # stable dedupe key
+    headline: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0")
+    score_breakdown: Mapped[dict | None] = mapped_column(JSONB)  # explainable factors
+    velocity: Mapped[float | None] = mapped_column(Float)        # signals/hour
+    source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    signal_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    covered_by_us: Mapped[bool | None] = mapped_column(Boolean)  # None = unknown
+    entities: Mapped[dict | None] = mapped_column(JSONB)         # {oems, models, terms}
+    evidence: Mapped[list | None] = mapped_column(JSONB)         # [{origin, source, title, url, published_at}]
+    dossier: Mapped[dict | None] = mapped_column(JSONB)          # collected research (null until built)
+    dossier_ref: Mapped[dict | None] = mapped_column(JSONB)      # artifact pointer for rendered dossier
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="detected", server_default="detected")
+    origin: Mapped[str] = mapped_column(Text, nullable=False, default="scout", server_default="scout")  # scout|manual
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # perishability
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    pipelines: Mapped[list["ContentPipeline"]] = relationship(
+        back_populates="trend", order_by="ContentPipeline.id"
+    )
+
+    __table_args__ = (
+        Index("ix_trend_brand_status_score", "brand", "status", "score"),
+        Index("ix_trend_cluster_key", "cluster_key"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Trend id={self.id} brand={self.brand} score={self.score:.0f} status={self.status}>"
+
+
+class ContentPipeline(Base):
+    """A trigger request: 'generate content for this trend' — pending until a
+    human approves or declines. Approval fields mirror plan/plan_item (PRD §8):
+    the scout can never self-approve."""
+
+    __tablename__ = "content_pipeline"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trend_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("trend.id", ondelete="SET NULL")
+    )
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="pending_approval", server_default="pending_approval"
+    )
+    requested_by: Mapped[str] = mapped_column(
+        Text, nullable=False, default="trend_scout", server_default="trend_scout"
+    )
+    approved_by: Mapped[str | None] = mapped_column(Text)   # human identity (Google SSO email)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    declined_by: Mapped[str | None] = mapped_column(Text)
+    declined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    instructions: Mapped[str | None] = mapped_column(Text)  # editor guidance at approval time
+    content_types: Mapped[list | None] = mapped_column(JSONB)  # requested content types
+    events: Mapped[list | None] = mapped_column(JSONB)      # audit timeline [{at, actor, event, detail}]
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    trend: Mapped[Trend | None] = relationship(back_populates="pipelines")
+    jobs: Mapped[list["ContentJob"]] = relationship(
+        back_populates="pipeline", cascade="all, delete-orphan", order_by="ContentJob.id"
+    )
+
+    __table_args__ = (Index("ix_content_pipeline_brand_status", "brand", "status"),)
+
+    def __repr__(self) -> str:
+        return f"<ContentPipeline id={self.id} brand={self.brand} status={self.status}>"
+
+
+class ContentJob(Base):
+    """One generator invocation (article / social post / …) inside a pipeline.
+    Regeneration bumps ``attempt`` and archives the prior attempt in ``history``."""
+
+    __tablename__ = "content_job"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pipeline_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("content_pipeline.id", ondelete="CASCADE")
+    )
+    content_type: Mapped[str] = mapped_column(Text, nullable=False)  # article|social_post|newsletter_blurb|video_script
+    transport: Mapped[str] = mapped_column(Text, nullable=False, default="llm", server_default="llm")
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="queued", server_default="queued")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    instructions: Mapped[str | None] = mapped_column(Text)  # latest regen instructions
+    history: Mapped[list | None] = mapped_column(JSONB)     # prior attempts [{attempt, instructions, preview_ref, at}]
+    preview_ref: Mapped[dict | None] = mapped_column(JSONB)  # artifact pointer for the preview
+    preview_meta: Mapped[dict | None] = mapped_column(JSONB)  # {title, word_count, excerpt, ...}
+    external_ref: Mapped[dict | None] = mapped_column(JSONB)  # e.g. {"hc_viral_topic_id": 42}
+    result_ref: Mapped[dict | None] = mapped_column(JSONB)   # publish outcome
+    cost: Mapped[dict | None] = mapped_column(JSONB)         # {llm_micros, usd}
+    error: Mapped[str | None] = mapped_column(Text)
+    reviewed_by: Mapped[str | None] = mapped_column(Text)    # approve/reject attribution
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    pipeline: Mapped[ContentPipeline | None] = relationship(back_populates="jobs")
+
+    __table_args__ = (Index("ix_content_job_pipeline_status", "pipeline_id", "status"),)
+
+    def __repr__(self) -> str:
+        return (
+            f"<ContentJob id={self.id} type={self.content_type} transport={self.transport} "
+            f"status={self.status} attempt={self.attempt}>"
         )
 
 

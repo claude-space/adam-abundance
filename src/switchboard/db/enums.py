@@ -48,6 +48,47 @@ class PlanItemStatus(str, Enum):
     FAILED = "failed"
 
 
+class TrendStatus(str, Enum):
+    """Lifecycle of a detected competitor trend (docs/trend-pipeline.md)."""
+
+    DETECTED = "detected"
+    DOSSIER_BUILDING = "dossier_building"
+    PROPOSED = "proposed"                # a trigger request exists, awaiting a human
+    APPROVED = "approved"                # at least one pipeline approved
+    DECLINED = "declined"
+    DISMISSED = "dismissed"              # human said "not this one" (dedup window applies)
+    EXPIRED = "expired"                  # perishable — nobody acted in time
+    COMPLETED = "completed"              # a pipeline ran to published/closed
+
+
+class PipelineStatus(str, Enum):
+    """Lifecycle of a content-pipeline trigger request."""
+
+    PENDING_APPROVAL = "pending_approval"
+    APPROVED = "approved"
+    GENERATING = "generating"
+    PREVIEWS_READY = "previews_ready"
+    PUBLISHED = "published"
+    PARTIALLY_PUBLISHED = "partially_published"
+    DECLINED = "declined"
+    CLOSED = "closed"
+    FAILED = "failed"
+    EXPIRED = "expired"
+
+
+class ContentJobStatus(str, Enum):
+    """Lifecycle of one generator invocation inside a pipeline."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    PREVIEW_READY = "preview_ready"
+    APPROVED = "approved"                # editor accepted the preview
+    PUBLISHED = "published"              # gated hand-off recorded (Emaki draft / manual)
+    REJECTED = "rejected"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class ToolAction(str, Enum):
     READ = "read"
     ACT = "act"

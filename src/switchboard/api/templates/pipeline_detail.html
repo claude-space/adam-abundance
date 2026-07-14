@@ -1,0 +1,187 @@
+{% extends 'base.html' %}
+{% block title %}Pipeline #{{ p.id }} — Switchboard{% endblock %}
+{% block body %}
+
+<div class="pagehead">
+  <h2>Pipeline #{{ p.id }} — {{ p.headline }}</h2>
+  <span class="sub"><a href="/pipelines">← Pipelines</a>
+    {% if p.trend_id %} · <a href="/trends/{{ p.trend_id }}">trend detail</a>{% endif %}</span>
+</div>
+
+<div class="phero" style="--ph:#5b9dff">
+  <div class="ph-stats">
+    <span class="pillx">status <b class="status-{{ p.status }}">{{ p.status|replace('_',' ') }}</b></span>
+    <span class="pillx">brand <b>{{ p.brand }}</b></span>
+    <span class="pillx">requested by <b>{{ p.requested_by }}</b></span>
+    {% if p.approved_by %}<span class="pillx">approved by <b>{{ p.approved_by }}</b> {{ p.approved_at }}</span>{% endif %}
+    {% if p.declined_by %}<span class="pillx">declined by <b>{{ p.declined_by }}</b></span>{% endif %}
+  </div>
+  {% if p.instructions %}
+  <div class="ph-sub" style="margin-top:10px"><b>Editor instructions:</b> {{ p.instructions }}</div>
+  {% endif %}
+  {% if p.close_reason %}<div class="ph-sub"><b>Reason:</b> {{ p.close_reason }}</div>{% endif %}
+</div>
+
+{% if p.status == 'pending_approval' %}
+<div class="panel" style="border-color:color-mix(in srgb,var(--warn) 45%,transparent)">
+  <h3>This pipeline is waiting for a decision</h3>
+  {% if can_approve %}
+  <form method="post" action="/pipelines/{{ p.id }}/approve">
+    <div class="toolbar">
+      <span>
+        <label>content types</label><br>
+        {% for ct in content_types %}
+        <label style="margin-right:14px"><input type="checkbox" name="content_types" value="{{ ct }}"
+          {% if ct in p.content_types %}checked{% endif %} /> {{ ct|replace('_',' ') }}</label>
+        {% endfor %}
+      </span>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <label>instructions (optional)<br>
+        <textarea name="instructions" rows="2" cols="70" placeholder="Angle, tone, must-include facts, what to avoid…">{{ p.instructions or '' }}</textarea></label>
+    </div>
+    <div class="toolbar" style="margin-top:10px">
+      <button type="submit">Approve — generate content</button>
+      {% if kill_switch %}<span class="badge live">kill switch ON — jobs will be refused until it is lifted</span>{% endif %}
+    </div>
+  </form>
+  <form method="post" action="/pipelines/{{ p.id }}/decline" style="margin-top:12px">
+    <div class="toolbar">
+      <label>decline reason (optional)<br><input type="text" name="reason" size="46" /></label>
+      <button type="submit" class="danger" onclick="return confirm('Decline this pipeline request?')">Decline</button>
+    </div>
+  </form>
+  {% else %}
+  <div class="muted">Your role can't approve for this brand — an approver will pick this up.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% for j in p.jobs %}
+<div class="panel">
+  <h3>{{ j.content_type|replace('_',' ')|title }}
+    <span class="badge muted">attempt {{ j.attempt }}</span>
+    <span class="badge">{{ j.transport|replace('_',' ') }}</span>
+    <span class="hint status-{{ j.status }}">{{ j.status|replace('_',' ') }}</span></h3>
+
+  {% if j.status == 'queued' %}
+    <div class="muted">Queued — the worker picks this up within ~2 minutes (or immediately after approval).</div>
+  {% elif j.status == 'running' %}
+    <div class="muted"><span class="pulse"></span>&nbsp; Generating{% if j.generator or j.transport != 'llm' %} via {{ j.transport }}{% endif %}… refresh shortly.</div>
+  {% elif j.status == 'failed' %}
+    <div style="color:var(--bad)"><b>Failed:</b> {{ j.error }}</div>
+  {% elif j.status == 'cancelled' %}
+    <div class="muted">Cancelled.</div>
+  {% endif %}
+
+  {% if j.preview_text %}
+  <div style="margin:12px 0">
+    <div class="toolbar" style="margin-bottom:8px">
+      {% if j.title %}<b>{{ j.title }}</b>{% endif %}
+      {% if j.word_count %}<span class="chip">{{ j.word_count }} words</span>{% endif %}
+      {% if j.cost and j.cost.llm_micros %}<span class="chip">${{ '%.2f'|format(j.cost.llm_micros / 1000000) }} LLM</span>{% endif %}
+      {% if j.preview_url %}<a href="{{ j.preview_url }}" target="_blank" rel="noopener">open artifact ↗</a>{% endif %}
+    </div>
+    <pre style="max-height:420px">{{ j.preview_text }}</pre>
+  </div>
+  {% endif %}
+
+  {% if j.result %}
+  <div class="toolbar" style="margin:8px 0">
+    {% if j.result.mode == 'emaki_unpublished_draft' %}
+      <span class="badge ok">pushed to Emaki as an UNPUBLISHED draft (topic {{ j.result.topic_id }})</span>
+    {% elif j.result.mode == 'manual_handoff' %}
+      <span class="badge ok">approved for manual hand-off</span>
+      <span class="muted">a human performs the actual publish/post — Switchboard never posts autonomously</span>
+    {% endif %}
+    {% if j.reviewed_by %}<span class="muted">by {{ j.reviewed_by }}</span>{% endif %}
+  </div>
+  {% endif %}
+
+  <div class="toolbar" style="margin-top:10px">
+    {% if can_approve and j.status == 'preview_ready' %}
+    <form method="post" action="/jobs/{{ j.id }}/review" class="inline">
+      <input type="hidden" name="verdict" value="approve" />
+      <button type="submit">Accept preview</button>
+    </form>
+    <form method="post" action="/jobs/{{ j.id }}/review" class="inline">
+      <input type="hidden" name="verdict" value="reject" />
+      <button type="submit" class="danger" onclick="return confirm('Reject this draft? You can still regenerate afterwards.')">Reject</button>
+    </form>
+    {% endif %}
+    {% if can_approve and j.status == 'approved' %}
+    <form method="post" action="/jobs/{{ j.id }}/publish" class="inline">
+      <button type="submit" class="danger"
+        onclick="return confirm('{% if j.transport == 'hc_viral_hits' %}Push to Emaki as an UNPUBLISHED CMS draft?{% else %}Mark as approved for hand-off? A human still performs the actual publish.{% endif %}')">
+        {% if j.transport == 'hc_viral_hits' %}Push CMS draft{% else %}Approve for hand-off{% endif %}</button>
+    </form>
+    {% endif %}
+  </div>
+
+  {% if can_approve and j.status in ('preview_ready', 'approved', 'rejected', 'failed') %}
+  <details style="margin-top:10px">
+    <summary class="muted">Regenerate with new instructions</summary>
+    <form method="post" action="/jobs/{{ j.id }}/regenerate" style="margin-top:8px">
+      <div class="toolbar">
+        <label>what should change?<br>
+          <textarea name="instructions" rows="2" cols="70" required
+            placeholder="e.g. Lead with the recall numbers, drop the speculation, punchier headline"></textarea></label>
+        <button type="submit">Regenerate</button>
+      </div>
+    </form>
+  </details>
+  {% endif %}
+
+  {% if j.history %}
+  <details style="margin-top:10px">
+    <summary class="muted">Previous attempts ({{ j.history|length }})</summary>
+    <table style="margin-top:8px">
+      <thead><tr><th>Attempt</th><th>Instructions</th><th>Preview</th><th>When</th></tr></thead>
+      <tbody>
+      {% for h in j.history %}
+        <tr>
+          <td class="num">{{ h.attempt }}</td>
+          <td class="muted">{{ h.instructions or '—' }}</td>
+          <td>{% if h.preview_ref and h.preview_ref.key %}<a href="/artifacts/{{ h.preview_ref.key }}" target="_blank" rel="noopener">artifact ↗</a>{% else %}—{% endif %}</td>
+          <td class="muted">{{ h.at[:16] if h.at else '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if p.open and can_approve and p.status != 'pending_approval' %}
+<div class="panel">
+  <form method="post" action="/pipelines/{{ p.id }}/close">
+    <div class="toolbar">
+      <label>close reason (optional)<br><input type="text" name="reason" size="46" /></label>
+      <button type="submit" class="danger"
+        onclick="return confirm('Close this pipeline? Pending jobs are cancelled.')">Close pipeline</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+
+{% if p.events %}
+<div class="panel">
+  <h3>Timeline <span class="hint muted">full audit trail, newest first</span></h3>
+  <table>
+    <thead><tr><th>When</th><th>Actor</th><th>Event</th><th>Detail</th></tr></thead>
+    <tbody>
+    {% for e in p.events %}
+      <tr>
+        <td class="muted" style="white-space:nowrap">{{ e.at[:16] if e.at else '' }}</td>
+        <td>{{ e.actor }}</td>
+        <td><span class="status-{{ e.event }}">{{ e.event|replace('_',' ') }}</span></td>
+        <td class="muted">{{ e.detail }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% endblock %}

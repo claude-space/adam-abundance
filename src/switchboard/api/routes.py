@@ -13,7 +13,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Form, Request
+from fastapi import APIRouter, BackgroundTasks, Form, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -28,11 +28,14 @@ from ..adapters.registry import ACTION_REGISTRY, owned_tool_names
 from ..config import get_settings
 from ..context import RunContext
 from ..db.enums import EntryType
-from ..db.models import MemoryEntry, Plan, PlanItem, ToolCallLog
+from ..db.models import ContentJob, ContentPipeline, MemoryEntry, Plan, PlanItem, ToolCallLog, Trend
 from ..logging_ import get_logger
 from ..orchestrator.dispatch import Dispatcher
 from ..orchestrator.plans import ApprovalError, PlanRepo
 from ..rbac import ROLE_LABELS, Role, can_approve, can_manage_users, is_valid_role
+from ..trends.lifecycle import CONTENT_TYPES, PIPELINE_OPEN_STATUSES, LifecycleError
+from ..trends.pipeline import approve_and_start, decline_pipeline, publish_job, run_job_sweep
+from ..trends.repo import PipelineRepo, TrendRepo
 from ..users import UserRepo
 from .auth import current_user, require_user
 
@@ -76,6 +79,8 @@ async def api_data():
             .group_by(MemoryEntry.type))).all()}
         plans = await PlanRepo(ctx.session).list_plans(15)
         spend = await _spend_snapshot(ctx)
+        trend_counts = await TrendRepo(ctx.session).counts_by_status()
+        pipeline_rows = await PipelineRepo(ctx.session).list(limit=200)
         rows = [{"id": p.id, "brand": p.brand, "plan_date": p.plan_date.isoformat(),
                  "status": p.status, "items": len(p.items)} for p in plans]
     summary = {
@@ -86,6 +91,11 @@ async def api_data():
         "llm_usd_today": round(spend["llm_micros"]["spent_today"] / 1e6, 4),
         "bq_mb_today": round(spend["bq_bytes"]["spent_today"] / 1048576, 1),
         "plans_recent": len(rows),
+        "trends_by_status": trend_counts,
+        "pipelines_pending_approval": sum(1 for p in pipeline_rows
+                                          if p.status == "pending_approval"),
+        "pipelines_previews_ready": sum(1 for p in pipeline_rows
+                                        if p.status == "previews_ready"),
     }
     return JSONResponse({"rows": rows, "summary": summary})
 
@@ -123,10 +133,18 @@ async def workflow_run(request: Request):
             .group_by(MemoryEntry.type))).all()}
         plans = await PlanRepo(ctx.session).list_plans(50)
         spend = await _spend_snapshot(ctx)
+        trend_counts = await TrendRepo(ctx.session).counts_by_status()
+        open_pipelines = await PipelineRepo(ctx.session).list(
+            statuses=list(PIPELINE_OPEN_STATUSES), limit=100)
     if brand:
         plans = [p for p in plans if p.brand == brand]
+        open_pipelines = [p for p in open_pipelines if p.brand == brand]
     scope = settings.brand(brand).display_name if brand else "the Auto portfolio"
     latest = plans[0] if plans else None
+    open_trends = sum(v for k, v in trend_counts.items()
+                      if k in ("detected", "dossier_building", "proposed", "approved"))
+    pending = sum(1 for p in open_pipelines if p.status == "pending_approval")
+    previews = sum(1 for p in open_pipelines if p.status == "previews_ready")
     lines = [
         f"Switchboard status for {scope}:",
         f"- Shared memory: {by_type.get('fact', 0)} verified facts, "
@@ -134,6 +152,8 @@ async def workflow_run(request: Request):
         f"- Plans on record: {len(plans)}" + (
             f"; latest ({latest.plan_date.isoformat()}) is '{latest.status}' "
             f"with {len(latest.items)} items." if latest else "."),
+        f"- Competitor trends: {open_trends} open; {pending} pipeline request(s) awaiting "
+        f"approval; {previews} with previews ready for review.",
         f"- Spend today: ${spend['llm_micros']['spent_today'] / 1e6:.2f} LLM, "
         f"{spend['bq_bytes']['spent_today'] / 1048576:.0f} MB BigQuery, "
         f"{spend['ahrefs_units']['spent_today']} Ahrefs units.",
@@ -396,7 +416,8 @@ async def memory_browser(request: Request, brand: str | None = None, type: str |
         {"user": user, "entries": entries, "summary": summary, "brands": list(settings.brand_keys),
          "types": [t.value for t in EntryType],
          "agents": ["research", "opportunity", "production", "analytics", "reporting", "paid_media",
-                    "orchestrator", "decay_scan", "content_audit", "governor", "system"],
+                    "orchestrator", "decay_scan", "content_audit", "trend_scout", "trend_pipeline",
+                    "governor", "system"],
          "f": {"brand": brand or "", "type": type or "", "verified": verified or "",
                "source_agent": source_agent or ""}},
     )
@@ -463,7 +484,7 @@ AGENT_META: list[dict[str, Any]] = [
 ]
 AGENT_COLORS = {m["key"]: m["color"] for m in AGENT_META}
 AGENT_COLORS.update({"decay_scan": "#6f7887", "content_audit": "#6f7887", "governor": "#f4574d",
-                     "system": "#6f7887"})
+                     "system": "#6f7887", "trend_scout": "#26c6a6", "trend_pipeline": "#26c6a6"})
 # Entry-type identity colors (memory browser, donuts, badges).
 TYPE_COLORS = {"metric": "#5b9dff", "flag": "#d6a021", "fact": "#3fb950", "claim": "#e8833a",
                "decision": "#7c5cff", "context": "#6f7887", "report": "#ec6cb0",
@@ -477,6 +498,9 @@ FEEDER_META = [
      "domain": "Seona's scanner drops decay candidates into memory on its schedule."},
     {"key": "content_audit", "display": "Content-depth auditor",
      "domain": "Flags thin / low-depth articles into memory on its schedule."},
+    {"key": "trend_scout", "display": "Trend Scout",
+     "domain": "Clusters competitor coverage + Tavily/Perplexity/Firecrawl/NewsAPI signals into "
+               "scored trends and files pipeline trigger requests for human approval."},
 ]
 
 
@@ -608,6 +632,11 @@ SYSTEMS_META: list[dict[str, Any]] = [
     ("Warehouse & data", "Ahrefs", "opportunity", "read · metered", "Competitor keywords, SERP, backlinks", ("cred", "ahrefs")),
     ("Warehouse & data", "GSC exports", "opportunity", "read", "Search demand (empty for Auto trio — §13.13)", ("cred", "google_sa_inline")),
     ("Warehouse & data", "Similarweb", "research", "read", "Competitor traffic estimates", ("cred", "similarweb")),
+    # Trend sourcing (docs/trend-pipeline.md)
+    ("Trend sourcing", "Tavily", "research", "read", "News search — trend signals + dossier deep search", ("cred", "tavily")),
+    ("Trend sourcing", "Perplexity", "research", "read", "Search-grounded summaries with citations", ("cred", "perplexity")),
+    ("Trend sourcing", "Firecrawl", "research", "read", "Web search + page extraction for dossiers", ("cred", "firecrawl")),
+    ("Trend sourcing", "NewsAPI", "research", "read", "Headline stream for the trend scout", ("cred", "newsapi")),
     # Editorial pipelines
     ("Editorial pipelines", "Claude Albert", "production", "read + action", "Discover ideation + AI writer + outline reviewer", ("endpoint", "albert")),
     ("Editorial pipelines", "Seona", "opportunity", "read + action", "SEO ideation + ranking-decay + Update Strategist", ("endpoint", "seona")),
@@ -732,9 +761,436 @@ async def artifact(request: Request, key: str):
     require_user(request)
     root = Path(get_settings().artifacts.local_dir).resolve()
     target = (root / key).resolve()
-    if not str(target).startswith(str(root)) or not target.is_file():
+    # is_relative_to, not startswith: a bare prefix also matches sibling dirs
+    # that merely share the name (…/local_artifacts_old).
+    if not target.is_relative_to(root) or not target.is_file():
         return HTMLResponse("<h3>Artifact not found</h3>", status_code=404)
     return FileResponse(target)
+
+
+# ---------------------------------------------------------------------------
+# Competitor trend pipeline (docs/trend-pipeline.md)
+# ---------------------------------------------------------------------------
+
+def _artifact_url(ref: dict[str, Any] | None) -> str | None:
+    if not isinstance(ref, dict):
+        return None
+    if ref.get("backend") == "local" and ref.get("key"):
+        return f"/artifacts/{ref['key']}"
+    return ref.get("uri")
+
+
+def _artifact_text(ref: dict[str, Any] | None, max_bytes: int = 12_000) -> str | None:
+    """Inline preview of a local artifact (guarded like GET /artifacts)."""
+    if not isinstance(ref, dict) or ref.get("backend") != "local" or not ref.get("key"):
+        return None
+    root = Path(get_settings().artifacts.local_dir).resolve()
+    target = (root / ref["key"]).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return None
+    try:
+        data = target.read_bytes()[:max_bytes]
+        text = data.decode("utf-8", errors="replace")
+        return text + ("\n\n… (truncated — open the full artifact)" if target.stat().st_size > max_bytes else "")
+    except OSError:
+        return None
+
+
+def _fmt_dt(dt: datetime | None, fmt: str = "%m-%d %H:%M") -> str:
+    return dt.strftime(fmt) if dt else ""
+
+
+def _trend_dict(t: Trend, *, with_dossier: bool = False) -> dict[str, Any]:
+    pipelines = sorted(t.pipelines or [], key=lambda p: p.id or 0)
+    out: dict[str, Any] = {
+        "id": t.id, "brand": t.brand, "headline": t.headline, "summary": t.summary,
+        "score": round(t.score or 0), "velocity": t.velocity,
+        "source_count": t.source_count, "signal_count": t.signal_count,
+        "covered_by_us": t.covered_by_us, "status": t.status, "origin": t.origin,
+        "oems": (t.entities or {}).get("oems", []),
+        "breaking": (t.score_breakdown or {}).get("breaking", 0) > 0,
+        "watchlisted": (t.score_breakdown or {}).get("watchlist", 0) > 0,
+        "first_seen": _fmt_dt(t.first_seen_at), "last_seen": _fmt_dt(t.last_seen_at),
+        "expires_at": _fmt_dt(t.expires_at, "%m-%d %H:%M UTC"),
+        "pipelines": [{"id": p.id, "status": p.status} for p in pipelines],
+        "pending_pipeline_id": next((p.id for p in pipelines
+                                     if p.status == "pending_approval"), None),
+        "has_dossier": bool(t.dossier),
+    }
+    if with_dossier:
+        out.update({
+            "score_breakdown": {k: round(v, 1) for k, v in (t.score_breakdown or {}).items() if v},
+            "evidence": t.evidence or [], "dossier": t.dossier or {},
+            "dossier_url": _artifact_url(t.dossier_ref),
+        })
+    return out
+
+
+def _pipeline_dict(p: ContentPipeline, *, with_jobs: bool = True) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "id": p.id, "brand": p.brand, "status": p.status, "trend_id": p.trend_id,
+        "headline": p.trend.headline if p.trend else f"pipeline #{p.id}",
+        "trend_score": round(p.trend.score) if p.trend and p.trend.score else None,
+        "requested_by": p.requested_by, "approved_by": p.approved_by,
+        "approved_at": _fmt_dt(p.approved_at), "declined_by": p.declined_by,
+        "close_reason": p.close_reason, "instructions": p.instructions,
+        "content_types": p.content_types or [], "created_at": _fmt_dt(p.created_at),
+        "events": list(reversed(p.events or []))[:20],
+        "open": p.status in PIPELINE_OPEN_STATUSES,
+    }
+    if with_jobs:
+        out["jobs"] = [_job_dict(j) for j in sorted(p.jobs or [], key=lambda j: j.id or 0)]
+    else:
+        out["job_count"] = len(p.jobs or [])
+    return out
+
+
+def _job_dict(j: ContentJob) -> dict[str, Any]:
+    meta = j.preview_meta or {}
+    return {
+        "id": j.id, "content_type": j.content_type, "transport": j.transport,
+        "status": j.status, "attempt": j.attempt, "instructions": j.instructions,
+        "error": j.error, "title": meta.get("title") or j.content_type.replace("_", " "),
+        "word_count": meta.get("word_count"), "generator": meta.get("generator"),
+        "preview_url": _artifact_url(j.preview_ref),
+        "preview_text": _artifact_text(j.preview_ref) if j.preview_ref else None,
+        "result": j.result_ref, "reviewed_by": j.reviewed_by,
+        "history": j.history or [], "cost": j.cost,
+        "updated_at": _fmt_dt(j.updated_at or j.created_at),
+    }
+
+
+@router.get("/trends", response_class=HTMLResponse)
+async def trends_page(request: Request, brand: str | None = None, scanning: str | None = None):
+    """Trend Radar: open trends ranked by score + pending trigger requests."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        repo = TrendRepo(ctx.session)
+        open_trends = [_trend_dict(t) for t in await repo.list(
+            brand=brand or None,
+            statuses=["detected", "dossier_building", "proposed", "approved"], limit=60)]
+        recent_closed = [_trend_dict(t) for t in await repo.list(
+            brand=brand or None,
+            statuses=["dismissed", "declined", "expired", "completed"], limit=15)]
+        pipelines = [_pipeline_dict(p, with_jobs=False)
+                     for p in await PipelineRepo(ctx.session).list(brand=brand or None, limit=40)]
+    # Approvability is per row — a brand_user may approve their brand's rows on
+    # an unfiltered (portfolio-wide) page.
+    for row in (*open_trends, *recent_closed, *pipelines):
+        row["can_approve"] = _can_approve(request, row["brand"])
+    pending = [p for p in pipelines if p["status"] == "pending_approval"]
+    stats = {
+        "open": len(open_trends),
+        "pending": len(pending),
+        "generating": sum(1 for p in pipelines if p["status"] in ("approved", "generating")),
+        "previews": sum(1 for p in pipelines if p["status"] == "previews_ready"),
+        "gaps": sum(1 for t in open_trends if t["covered_by_us"] is False),
+    }
+    return templates.TemplateResponse(
+        request, "trends.html",
+        {"user": user, "trends": open_trends, "closed": recent_closed, "pending": pending,
+         "pipelines": pipelines[:20], "stats": stats, "brands": list(settings.brand_keys),
+         "content_types": list(CONTENT_TYPES),
+         "kill_switch": settings.kill_switch, "trend_cfg": settings.trends,
+         "scanning": scanning == "1", "f": {"brand": brand or ""}},
+    )
+
+
+@router.post("/trends/scan")
+async def trends_scan(request: Request, background_tasks: BackgroundTasks,
+                      brand: str = Form("portfolio")):
+    """Kick a scan in the background (sources + LLM dossiers can take a minute).
+    Scans hit paid source APIs + build LLM dossiers, so viewers can't trigger them."""
+    user = require_user(request)
+    brand = brand or "portfolio"
+    if not get_settings().is_valid_scope(brand):
+        return JSONResponse({"error": f"unknown brand '{brand}'"}, status_code=400)
+    if not can_approve(user.get("role", "viewer"), user.get("brands"), brand):
+        return _FORBIDDEN
+    from ..trends.scout import run_trend_scan
+
+    background_tasks.add_task(run_trend_scan, brand)
+    return RedirectResponse("/trends?scanning=1", status_code=302)
+
+
+@router.post("/trends/manual")
+async def trends_manual(request: Request, background_tasks: BackgroundTasks,
+                        topic: str = Form(...), brand: str = Form("portfolio"),
+                        url: str = Form("")):
+    """Editor-pasted trend — rides the same dossier/trigger/approval path."""
+    user = require_user(request)
+    if not topic.strip():
+        return JSONResponse({"error": "topic is required"}, status_code=400)
+    from ..trends.scout import add_manual_trend
+
+    async with RunContext.open() as ctx:
+        if not ctx.settings.is_valid_scope(brand):
+            return JSONResponse({"error": f"unknown brand '{brand}'"}, status_code=400)
+        try:
+            trend = await add_manual_trend(ctx, topic=topic.strip(), brand=brand,
+                                           actor=user["email"], url=url.strip() or None)
+            trend_id = trend.id
+        except Exception as exc:  # noqa: BLE001 — surfaced to the editor, not a 500
+            log.warning("manual trend failed: %s", exc)
+            return JSONResponse({"error": f"could not create trend: {exc}"}, status_code=400)
+    return RedirectResponse(f"/trends/{trend_id}", status_code=302)
+
+
+@router.get("/trends/{trend_id}", response_class=HTMLResponse)
+async def trend_detail(request: Request, trend_id: int):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        trend = await TrendRepo(ctx.session).get(trend_id)
+        if trend is None:
+            return HTMLResponse("<h3>Trend not found</h3>", status_code=404)
+        data = _trend_dict(trend, with_dossier=True)
+        pipelines = [_pipeline_dict(p) for p in
+                     sorted(trend.pipelines or [], key=lambda p: -(p.id or 0))]
+        # Fact-gate state for this trend: verified facts vs pending claims.
+        claims = await ctx.store.query(
+            brand=trend.brand, types=[EntryType.CLAIM],
+            payload_contains={"kind": "trend_key_fact", "trend_id": trend.id},
+            status=None, limit=20)
+        facts = await ctx.store.query(
+            brand=trend.brand, types=[EntryType.FACT], verified=True,
+            payload_contains={"kind": "verified_fact"}, limit=50)
+        statements = {(c.payload or {}).get("statement") for c in claims}
+        verified = [f.payload.get("statement") for f in facts
+                    if f.payload and f.payload.get("statement") in statements]
+        pending_claims = [{"statement": (c.payload or {}).get("statement"), "status": c.status}
+                          for c in claims
+                          if (c.payload or {}).get("statement") not in set(verified)]
+    may_approve = _can_approve(request, data["brand"])
+    return templates.TemplateResponse(
+        request, "trend_detail.html",
+        {"user": user, "t": data, "pipelines": pipelines,
+         "verified_facts": verified, "claims": pending_claims,
+         "content_types": list(CONTENT_TYPES),
+         "default_types": list(settings.trends.default_content_types),
+         "can_approve": may_approve, "kill_switch": settings.kill_switch},
+    )
+
+
+@router.post("/trends/{trend_id}/dismiss")
+async def trend_dismiss(request: Request, trend_id: int):
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        repo = TrendRepo(ctx.session)
+        trend = await repo.get(trend_id)
+        if trend is None:
+            return JSONResponse({"error": "trend not found"}, status_code=404)
+        if not _can_approve(request, trend.brand):
+            return _FORBIDDEN
+        try:
+            await repo.dismiss(trend_id, user["email"])
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return RedirectResponse("/trends", status_code=302)
+
+
+@router.post("/trends/{trend_id}/trigger")
+async def trend_trigger(request: Request, background_tasks: BackgroundTasks, trend_id: int,
+                        instructions: str = Form(""), approve_now: str = Form("")):
+    """Create a trigger request for a trend. Approvers can create-and-approve in
+    one step; everyone else creates a pending request for an approver."""
+    user = require_user(request)
+    form = await request.form()
+    picked = [str(v) for v in form.getlist("content_types")]
+    wants_approve = approve_now.lower() in ("1", "true", "on", "yes")
+    async with RunContext.open() as ctx:
+        trend = await TrendRepo(ctx.session).get(trend_id)
+        if trend is None:
+            return JSONResponse({"error": "trend not found"}, status_code=404)
+        # Check-then-mutate: nothing is created if the request will be refused.
+        if wants_approve and not _can_approve(request, trend.brand):
+            return _FORBIDDEN
+        if trend.status not in ("detected", "dossier_building", "proposed"):
+            return JSONResponse(
+                {"error": f"trend is {trend.status} — it can no longer be triggered"},
+                status_code=400)
+        repo = PipelineRepo(ctx.session)
+        try:
+            pipeline = await repo.create(
+                trend_id=trend.id, brand=trend.brand,
+                content_types=picked or list(get_settings().trends.default_content_types),
+                requested_by=user["email"], instructions=instructions.strip() or None)
+            trend.status = "proposed" if trend.status in ("detected", "dossier_building") else trend.status
+            pipeline_id = pipeline.id
+            if wants_approve:
+                await approve_and_start(ctx, pipeline_id, user["email"])
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    background_tasks.add_task(run_job_sweep)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
+
+
+@router.get("/pipelines", response_class=HTMLResponse)
+async def pipelines_page(request: Request, brand: str | None = None, status: str | None = None):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        rows = await PipelineRepo(ctx.session).list(
+            brand=brand or None, statuses=[status] if status else None, limit=80)
+        pipelines = [_pipeline_dict(p, with_jobs=False) for p in rows]
+    counts: dict[str, int] = {}
+    for p in pipelines:
+        counts[p["status"]] = counts.get(p["status"], 0) + 1
+    return templates.TemplateResponse(
+        request, "pipelines.html",
+        {"user": user, "pipelines": pipelines, "counts": counts,
+         "brands": list(settings.brand_keys), "kill_switch": settings.kill_switch,
+         "f": {"brand": brand or "", "status": status or ""}},
+    )
+
+
+@router.get("/pipelines/{pipeline_id}", response_class=HTMLResponse)
+async def pipeline_detail(request: Request, pipeline_id: int):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        pipeline = await PipelineRepo(ctx.session).get(pipeline_id)
+        if pipeline is None:
+            return HTMLResponse("<h3>Pipeline not found</h3>", status_code=404)
+        data = _pipeline_dict(pipeline)
+        trend = _trend_dict(pipeline.trend) if pipeline.trend else None
+    may_approve = _can_approve(request, data["brand"])
+    settings = get_settings()
+    return templates.TemplateResponse(
+        request, "pipeline_detail.html",
+        {"user": user, "p": data, "trend": trend, "can_approve": may_approve,
+         "content_types": list(CONTENT_TYPES), "kill_switch": settings.kill_switch},
+    )
+
+
+@router.post("/pipelines/{pipeline_id}/approve")
+async def pipeline_approve(request: Request, background_tasks: BackgroundTasks,
+                           pipeline_id: int, instructions: str = Form("")):
+    user = require_user(request)
+    form = await request.form()
+    picked = [str(v) for v in form.getlist("content_types")]
+    async with RunContext.open() as ctx:
+        pipeline = await PipelineRepo(ctx.session).get(pipeline_id)
+        if pipeline is None:
+            return JSONResponse({"error": "pipeline not found"}, status_code=404)
+        if not _can_approve(request, pipeline.brand):
+            return _FORBIDDEN
+        try:
+            await approve_and_start(ctx, pipeline_id, user["email"],
+                                    content_types=picked or None,
+                                    instructions=instructions.strip() or None)
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    background_tasks.add_task(run_job_sweep)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
+
+
+@router.post("/pipelines/{pipeline_id}/decline")
+async def pipeline_decline(request: Request, pipeline_id: int, reason: str = Form("")):
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        pipeline = await PipelineRepo(ctx.session).get(pipeline_id)
+        if pipeline is None:
+            return JSONResponse({"error": "pipeline not found"}, status_code=404)
+        if not _can_approve(request, pipeline.brand):
+            return _FORBIDDEN
+        try:
+            await decline_pipeline(ctx, pipeline_id, user["email"], reason.strip() or None)
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return RedirectResponse("/trends", status_code=302)
+
+
+@router.post("/pipelines/{pipeline_id}/close")
+async def pipeline_close(request: Request, pipeline_id: int, reason: str = Form("")):
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        repo = PipelineRepo(ctx.session)
+        pipeline = await repo.get(pipeline_id)
+        if pipeline is None:
+            return JSONResponse({"error": "pipeline not found"}, status_code=404)
+        if not _can_approve(request, pipeline.brand):
+            return _FORBIDDEN
+        try:
+            await repo.close(pipeline_id, user["email"], reason.strip() or None)
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
+
+
+@router.post("/jobs/{job_id}/review")
+async def job_review(request: Request, job_id: int, verdict: str = Form(...)):
+    """Editor verdict on a preview: 'approve' or 'reject'. RBAC runs against the
+    job's OWN pipeline — never a caller-supplied id."""
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        repo = PipelineRepo(ctx.session)
+        job = await repo.get_job(job_id)
+        if job is None or job.pipeline is None:
+            return JSONResponse({"error": "job not found"}, status_code=404)
+        if not _can_approve(request, job.pipeline.brand):
+            return _FORBIDDEN
+        pipeline_id = job.pipeline_id
+        try:
+            await repo.review_job(job_id, user["email"], approve=verdict == "approve")
+            await repo.refresh_rollup(pipeline_id)
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
+
+
+@router.post("/jobs/{job_id}/regenerate")
+async def job_regenerate(request: Request, background_tasks: BackgroundTasks, job_id: int,
+                         instructions: str = Form("")):
+    user = require_user(request)
+    if not instructions.strip():
+        return JSONResponse({"error": "tell the generator what to change"}, status_code=400)
+    async with RunContext.open() as ctx:
+        repo = PipelineRepo(ctx.session)
+        job = await repo.get_job(job_id)
+        if job is None or job.pipeline is None:
+            return JSONResponse({"error": "job not found"}, status_code=404)
+        if not _can_approve(request, job.pipeline.brand):
+            return _FORBIDDEN
+        pipeline_id = job.pipeline_id
+        try:
+            await repo.regenerate_job(job_id, user["email"], instructions)
+            await repo.refresh_rollup(pipeline_id)
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    background_tasks.add_task(run_job_sweep)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
+
+
+@router.post("/jobs/{job_id}/publish")
+async def job_publish(request: Request, job_id: int):
+    """The second human gate: Emaki unpublished-draft push (hc_viral transport)
+    or an explicit manual hand-off. Confirmed in the UI; refused on kill switch."""
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        repo = PipelineRepo(ctx.session)
+        job = await repo.get_job(job_id)
+        if job is None or job.pipeline is None:
+            return JSONResponse({"error": "job not found"}, status_code=404)
+        if not _can_approve(request, job.pipeline.brand):
+            return _FORBIDDEN
+        pipeline_id = job.pipeline_id
+        try:
+            await publish_job(ctx, job_id, user["email"])
+        except LifecycleError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:  # noqa: BLE001 — external CMS failure, readable not 500
+            log.warning("publish failed for job %s: %s", job_id, exc)
+            return JSONResponse({"error": f"publish failed: {exc}"}, status_code=502)
+    return RedirectResponse(f"/pipelines/{pipeline_id}", status_code=302)
 
 
 @router.get("/governor", response_class=HTMLResponse)

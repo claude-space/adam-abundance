@@ -30,6 +30,22 @@ async def _supersede() -> None:
         await ctx.store.supersede_duplicates()
 
 
+async def _pipeline_jobs() -> None:
+    """Cross-process fallback worker for queued/stuck content jobs."""
+    from ..trends.pipeline import run_job_sweep  # lazy: optional deps
+
+    await run_job_sweep()
+
+
+async def _trend_expire() -> None:
+    """Perishability must not depend on scans succeeding: expire unactioned
+    trends (+ their pending trigger requests) on a fixed cadence too."""
+    from ..trends.repo import TrendRepo  # lazy: optional deps
+
+    async with RunContext.open() as ctx:
+        await TrendRepo(ctx.session).expire_stale()
+
+
 def build_scheduler():
     try:
         from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore
@@ -53,6 +69,22 @@ def build_scheduler():
     sched.add_job(_sweep, CronTrigger(minute=15, timezone=_TZ), id="ttl_sweep", replace_existing=True)
     sched.add_job(_supersede, CronTrigger(hour=5, minute=45, timezone=_TZ),
                   id="supersede_sweep", replace_existing=True)
+
+    # Competitor trend pipeline (docs/trend-pipeline.md): one portfolio-wide scan
+    # on its own cadence + the content-job worker sweep. Both no-op when
+    # TREND_PIPELINE_ENABLED=0 (the scan checks it; the sweep just finds no jobs).
+    if settings.trends.enabled:
+        from apscheduler.triggers.interval import IntervalTrigger  # type: ignore
+
+        sched.add_job(run_feeder, IntervalTrigger(minutes=settings.trends.scan_interval_min,
+                                                  timezone=_TZ),
+                      args=["trend_scan", "portfolio"], id="trend_scan:portfolio",
+                      replace_existing=True)
+        sched.add_job(_pipeline_jobs, IntervalTrigger(minutes=2, timezone=_TZ),
+                      id="pipeline_jobs", replace_existing=True)
+    # Runs even when scans are disabled, so proposed trends still expire.
+    sched.add_job(_trend_expire, CronTrigger(minute=25, timezone=_TZ),
+                  id="trend_expire", replace_existing=True)
     return sched
 
 

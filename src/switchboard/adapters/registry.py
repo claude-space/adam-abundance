@@ -51,10 +51,25 @@ from .production import (
     OutlineReviewAdapter,
 )
 from .research import CompetitorNewsAdapter, SimilarwebAdapter
+from .trend_sources import (
+    FirecrawlTrendAdapter,
+    NewsApiTrendAdapter,
+    PerplexityTrendAdapter,
+    TavilyTrendAdapter,
+)
 
 # agent name -> adapter classes it owns
 REGISTRY: dict[str, list[Type[BaseAdapter]]] = {
-    "research": [SimilarwebAdapter, CompetitorNewsAdapter],
+    "research": [
+        SimilarwebAdapter,
+        CompetitorNewsAdapter,
+        # Trend-pipeline sources: portfolio-scoped, no-op during per-brand
+        # observe; the trend_scan feeder drives them (docs/trend-pipeline.md).
+        TavilyTrendAdapter,
+        NewsApiTrendAdapter,
+        FirecrawlTrendAdapter,
+        PerplexityTrendAdapter,
+    ],
     "opportunity": [
         AhrefsAdapter,
         GSCAdapter,

@@ -186,6 +186,30 @@ class Credentials:
     def similarweb_key(self) -> str | None:
         return self.resolve("SIMILARWEB_API_KEY")
 
+    # Trend-pipeline sources (docs/trend-pipeline.md). All optional — the
+    # sourcing adapters degrade softly when a key is absent.
+
+    def tavily_key(self) -> str | None:
+        return self.resolve("TAVILY_API_KEY")
+
+    def perplexity_key(self) -> str | None:
+        return self.resolve("PERPLEXITY_API_KEY")
+
+    def firecrawl_key(self) -> str | None:
+        return self.resolve("FIRECRAWL_API_KEY")
+
+    def newsapi_key(self) -> str | None:
+        return self.resolve("NEWSAPI_API_KEY") or self.resolve("NEWS_API_KEY")
+
+    def trend_agent(self, content_type: str) -> tuple[str | None, str | None]:
+        """Generic ShellAgent workflow generator for a content type:
+        (base_url, bearer_token) from TREND_AGENT_<TYPE>_URL / _TOKEN."""
+        key = content_type.upper()
+        return (
+            self.resolve(f"TREND_AGENT_{key}_URL", secret=False),
+            self.resolve(f"TREND_AGENT_{key}_TOKEN"),
+        )
+
     def google_sa(self) -> GoogleSA:
         """The Google service account used for BigQuery + Sheets (read-scoped)."""
         return GoogleSA(
@@ -283,13 +307,18 @@ class Credentials:
     # -- readiness (no values, only presence) ---------------------------------
 
     def describe(self) -> dict[str, bool]:
-        """Presence map for a startup readiness log — booleans only, never values."""
-        checks = {
+        """Presence map for a startup readiness log — booleans only, never values.
+        A tuple value means "present if ANY of these is set" (accessor fallbacks)."""
+        checks: dict[str, str | tuple[str, ...]] = {
             "anthropic": "ANTHROPIC_API_KEY",
             "asana": "ASANA_PAT",
             "sentinel": "SENTINEL_API_KEY",
             "ahrefs": "AHREFS_API_KEY",
             "similarweb": "SIMILARWEB_API_KEY",
+            "tavily": "TAVILY_API_KEY",
+            "perplexity": "PERPLEXITY_API_KEY",
+            "firecrawl": "FIRECRAWL_API_KEY",
+            "newsapi": ("NEWSAPI_API_KEY", "NEWS_API_KEY"),  # match newsapi_key()'s fallback
             "google_sa_inline": "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON",
             "google_sa_file": "GOOGLE_APPLICATION_CREDENTIALS",
             "gmail": "GMAIL_REFRESH_TOKEN",
@@ -301,7 +330,10 @@ class Credentials:
             "google_oauth": "GOOGLE_OAUTH_CLIENT_SECRET",
             "database_url": "DATABASE_URL",
         }
-        return {name: self.has(var) for name, var in checks.items()}
+        return {
+            name: any(self.has(v) for v in (var if isinstance(var, tuple) else (var,)))
+            for name, var in checks.items()
+        }
 
     def __repr__(self) -> str:  # never leak values
         present = sorted(k for k, v in self.describe().items() if v)
