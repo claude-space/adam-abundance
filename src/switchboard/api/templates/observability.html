@@ -5,8 +5,9 @@
 {% macro fmt(metric, v) %}{%- if metric == 'llm_micros' -%}${{ ((v or 0)/1000000)|round(2) }}{%- elif metric == 'bq_bytes' -%}{{ ((v or 0)/1048576)|round(1) }} MB{%- else -%}{{ v or 0 }} u{%- endif -%}{% endmacro %}
 
 <!-- ============ hero ============ -->
-<div class="phero rise" style="--ph:#3fb950">
-  <h2>
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Observability</span>
+  <h2 style="margin-top:12px">
     <span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
     Observability
   </h2>

@@ -6,8 +6,9 @@
 {% for q, status, note in decisions %}{% if status != 'default' %}{% set ns.open = ns.open + 1 %}{% endif %}{% endfor %}
 {% set pct = ((connected / total * 100) if total else 0) | round(1) %}
 
-<div class="phero rise" style="--ph:#5b9dff">
-  <h2>
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Integrations</span>
+  <h2 style="margin-top:12px">
     <span class="ph-icon">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 12 12 17 22 12"/><polyline points="2 17 12 22 22 17"/></svg>
     </span>

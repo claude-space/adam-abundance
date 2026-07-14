@@ -202,6 +202,7 @@ async def home(request: Request):
         stats = await _home_stats(ctx, plans)
         fleet = await _agents_overview(ctx)
         spend = await _spend_snapshot(ctx)
+        deltas = await _spend_deltas(ctx, spend)
     now = datetime.now()
     greeting = "Good morning" if now.hour < 12 else ("Good afternoon" if now.hour < 18 else "Good evening")
     first = (user.get("name") or user.get("email", "")).split("@")[0].split(".")[0].title()
@@ -224,7 +225,8 @@ async def home(request: Request):
         request, "plans.html",
         {"user": user, "plans": plans, "brands": list(settings.brand_keys),
          "kill_switch": settings.kill_switch, "portfolio": portfolio, "stats": stats, "fleet": fleet,
-         "hero": hero, "gauges": gauges, "fleet_max": fleet_max, "caps_enabled": caps.enabled},
+         "hero": hero, "gauges": gauges, "fleet_max": fleet_max, "caps_enabled": caps.enabled,
+         "deltas": deltas},
     )
 
 
@@ -1293,6 +1295,27 @@ async def _spend_snapshot(ctx: RunContext) -> dict[str, Any]:
     return out
 
 
+async def _spend_deltas(ctx: RunContext, spend: dict[str, Any]) -> dict[str, Any]:
+    """Today-vs-yesterday % change per metric, from spend_ledger — real numbers
+    for the dashboard KPI delta chips. pct is None when there's no baseline."""
+    from datetime import date, timedelta
+
+    from ..db.models import SpendLedger
+
+    yesterday = date.today() - timedelta(days=1)
+    rows = (await ctx.session.execute(
+        select(SpendLedger.metric, func.sum(SpendLedger.amount))
+        .where(SpendLedger.window_date == yesterday).group_by(SpendLedger.metric)
+    )).all()
+    prev = {m: int(a or 0) for m, a in rows}
+    out: dict[str, Any] = {}
+    for metric in ("llm_micros", "bq_bytes", "ahrefs_units"):
+        today = spend.get(metric, {}).get("spent_today", 0)
+        y = prev.get(metric, 0)
+        out[metric] = {"prev": y, "pct": round(100 * (today - y) / y, 1) if y else None}
+    return out
+
+
 async def _recent_audit(ctx: RunContext, limit: int) -> list[dict[str, Any]]:
     rows = (await ctx.session.execute(
         select(ToolCallLog).order_by(desc(ToolCallLog.created_at)).limit(limit)
@@ -1410,3 +1433,135 @@ def _csv_response(rows: list[dict[str, Any]], cols: list[str], filename: str) ->
         w.writerow(r)
     return PlainTextResponse(buf.getvalue(), media_type="text/csv",
                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+# ---------------------------------------------------------------------------
+# Activity feed + Notifications (real data: tool_call_log, memory flags, jobs)
+# ---------------------------------------------------------------------------
+
+def _ago(dt: datetime | None) -> str:
+    if dt is None:
+        return ""
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc)
+    d = dt if dt.tzinfo else dt.replace(tzinfo=_tz.utc)
+    secs = max(0, int((now - d).total_seconds()))
+    if secs < 60:
+        return f"{secs}s ago"
+    if secs < 3600:
+        return f"{secs // 60}m ago"
+    if secs < 86400:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+async def _activity_events(ctx: RunContext, limit: int = 60) -> list[dict[str, Any]]:
+    """Unified chronological event feed from the audit log + shared-memory writes."""
+    events: list[dict[str, Any]] = []
+    tcalls = (await ctx.session.execute(
+        select(ToolCallLog).order_by(desc(ToolCallLog.created_at)).limit(limit)
+    )).scalars().all()
+    for r in tcalls:
+        act = r.action == "act"
+        err = r.ok is False
+        events.append({
+            "ts": r.created_at, "kind": "error" if err else ("dispatch" if act else "tool_call"),
+            "agent": r.agent, "system": r.tool, "brand": r.brand,
+            "severity": "bad" if err else ("good" if act else "info"),
+            "message": f"{r.agent} {'ran' if act else 'called'} {r.tool}"
+                       + ("" if r.ok is None else (" — ok" if r.ok else " — failed"))
+                       + ("" if r.dry_run or not act else " (LIVE)"),
+        })
+    entries = await ctx.store.query(status=None, limit=limit)
+    for e in entries:
+        typ = e.type.value
+        kind = (e.payload or {}).get("kind", "")
+        is_gov = typ == "decision" and str(kind).startswith("spend")
+        events.append({
+            "ts": e.created_at, "kind": "governor" if is_gov else "memory_write",
+            "agent": e.source_agent, "system": e.source_system, "brand": e.brand,
+            "severity": "warn" if typ == "flag" else ("good" if e.verified else "info"),
+            "message": f"{e.source_agent} wrote {typ}" + (f" · {kind}" if kind else ""),
+        })
+    events.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=None), reverse=True)
+    events = events[:limit]
+    for ev in events:
+        ev["ago"] = _ago(ev["ts"])
+        ev["when"] = ev["ts"].strftime("%m-%d %H:%M:%S") if ev["ts"] else ""
+        ev.pop("ts", None)
+    return events
+
+
+async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str, Any]]:
+    """Human-actionable items: active flags, failed content jobs, failed plan items."""
+    out: list[dict[str, Any]] = []
+    flags = await ctx.store.query(types=[EntryType.FLAG], status="active", limit=limit)
+    for f in flags:
+        p = f.payload or {}
+        sev = {"high": "bad", "medium": "warn"}.get(str(p.get("severity", "")), "info")
+        out.append({"ts": f.created_at, "severity": sev,
+                    "title": str(p.get("kind", "flag")).replace("_", " ").title(),
+                    "detail": p.get("headline") or p.get("url") or p.get("note")
+                              or f"{f.source_agent} · {f.brand}", "brand": f.brand})
+    failed_jobs = (await ctx.session.execute(
+        select(ContentJob).where(ContentJob.status == "failed")
+        .order_by(desc(ContentJob.created_at)).limit(limit)
+    )).scalars().all()
+    for j in failed_jobs:
+        out.append({"ts": j.updated_at or j.created_at, "severity": "bad",
+                    "title": f"Content job failed — {j.content_type.replace('_', ' ')}",
+                    "detail": (j.error or "generation failed")[:160],
+                    "brand": j.pipeline.brand if j.pipeline else None})
+    failed_items = (await ctx.session.execute(
+        select(PlanItem).where(PlanItem.status == "failed")
+        .order_by(desc(PlanItem.created_at)).limit(limit)
+    )).scalars().all()
+    for it in failed_items:
+        ref = it.result_ref or {}
+        out.append({"ts": it.created_at, "severity": "bad",
+                    "title": f"Plan item failed — {it.action_type}",
+                    "detail": str(ref.get("refused") or ref.get("error") or "dispatch failed")[:160],
+                    "brand": None})
+    out.sort(key=lambda x: x["ts"] or datetime.min.replace(tzinfo=None), reverse=True)
+    out = out[:limit]
+    for n in out:
+        n["ago"] = _ago(n["ts"])
+        n.pop("ts", None)
+    return out
+
+
+@router.get("/activity", response_class=HTMLResponse)
+async def activity_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        events = await _activity_events(ctx, 80)
+    settings = get_settings()
+    return templates.TemplateResponse(request, "activity.html",
+                                      {"user": user, "events": events,
+                                       "kill_switch": settings.kill_switch})
+
+
+@router.get("/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        items = await _notification_items(ctx, 60)
+    settings = get_settings()
+    unread = sum(1 for n in items if n["severity"] in ("bad", "warn"))
+    return templates.TemplateResponse(request, "notifications.html",
+                                      {"user": user, "items": items, "unread": unread,
+                                       "kill_switch": settings.kill_switch})
+
+
+@router.get("/api/nav-badges")
+async def nav_badges(request: Request):
+    """Sidebar badge counts (actionable notifications). Auth-gated; 0 when signed out."""
+    if not current_user(request):
+        return JSONResponse({"notifications": 0})
+    async with RunContext.open() as ctx:
+        items = await _notification_items(ctx, 60)
+    return JSONResponse({"notifications": sum(1 for n in items if n["severity"] in ("bad", "warn"))})

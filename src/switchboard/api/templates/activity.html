@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Activity — Switchboard{% endblock %}
+{% block body %}
+
+{% set sev_color = {'good':'var(--good)','warn':'var(--warn)','bad':'var(--bad)','info':'var(--muted)'} %}
+{% set kind_meta = {
+  'tool_call': ('Tool call','var(--accent)'),
+  'dispatch': ('Dispatch','var(--good)'),
+  'governor': ('Governor','var(--bad)'),
+  'memory_write': ('Memory','var(--ink-2)'),
+  'error': ('Error','var(--bad)')
+} %}
+
+<div class="phero" style="--ph:#c9a84c">
+  <span class="pill-gold">Observability</span>
+  <h2 style="margin-top:12px"><span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>Activity</h2>
+  <div class="ph-sub">Everything moving through Switchboard — agent tool calls, dispatches, governor decisions, and shared-memory writes.</div>
+  <div class="ph-stats">
+    <span class="pillx">events <b>{{ events|length }}</b></span>
+    <span class="pillx"><span class="pulse-dot"></span> live tail</span>
+  </div>
+</div>
+
+<div class="toolbar" style="margin-bottom:14px" id="act-filters">
+  {% for key, label in [('all','All'),('tool_call','Tool calls'),('dispatch','Dispatch'),('governor','Governor'),('memory_write','Memory'),('error','Errors')] %}
+  <button type="button" class="chip{{ ' act' if key=='all' else '' }}" data-filter="{{ key }}"
+          style="cursor:pointer;{{ 'background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent-2);border-color:color-mix(in srgb,var(--accent) 35%,transparent)' if key=='all' else '' }}">{{ label }}</button>
+  {% endfor %}
+</div>
+
+<div class="panel" style="margin:0">
+  <div class="sect"><span class="rule-gold"></span>Event stream <span class="hint">newest first</span></div>
+  <div id="act-list" style="display:flex;flex-direction:column">
+    {% for e in events %}
+    {% set km = kind_meta.get(e.kind, ('Event','var(--muted)')) %}
+    <div class="act-row" data-kind="{{ e.kind }}"
+         style="display:flex;align-items:center;gap:12px;padding:11px 4px;border-bottom:1px solid var(--line)">
+      <span class="icon-tile" style="--c:{{ km[1] }};width:28px;height:28px">
+        <span class="adot" style="margin:0;background:{{ sev_color.get(e.severity,'var(--muted)') }}"></span>
+      </span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;color:var(--ink)">{{ e.message }}</div>
+        <div class="kpi-label" style="margin-top:3px;letter-spacing:.08em">
+          {{ km[0] }}{% if e.agent %} · <span style="color:{{ agent_color(e.agent) }}">{{ e.agent }}</span>{% endif %}{% if e.system %} · {{ e.system }}{% endif %}{% if e.brand %} · {{ e.brand }}{% endif %}
+        </div>
+      </div>
+      <span class="mono" style="font-size:11px;color:var(--muted);white-space:nowrap">{{ e.ago }}</span>
+    </div>
+    {% else %}
+    <div class="empty"><div class="e-icon">◔</div>No activity recorded yet.</div>
+    {% endfor %}
+  </div>
+  <div class="empty" id="act-empty" style="display:none"><div class="e-icon">◔</div>No events match this filter.</div>
+</div>
+
+<script>
+  (function () {
+    var filters = document.getElementById('act-filters');
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#act-list .act-row'));
+    var empty = document.getElementById('act-empty');
+    if (!filters) return;
+    filters.addEventListener('click', function (e) {
+      var btn = e.target.closest('[data-filter]'); if (!btn) return;
+      var f = btn.getAttribute('data-filter');
+      filters.querySelectorAll('[data-filter]').forEach(function (b) {
+        var on = b === btn;
+        b.style.background = on ? 'color-mix(in srgb,var(--accent) 16%,transparent)' : '';
+        b.style.color = on ? 'var(--accent-2)' : '';
+        b.style.borderColor = on ? 'color-mix(in srgb,var(--accent) 35%,transparent)' : '';
+      });
+      var shown = 0;
+      rows.forEach(function (r) {
+        var vis = f === 'all' || r.getAttribute('data-kind') === f;
+        r.style.display = vis ? '' : 'none'; if (vis) shown++;
+      });
+      empty.style.display = shown ? 'none' : '';
+    });
+  })();
+</script>
+{% endblock %}

@@ -13,8 +13,9 @@
 {% set fns = namespace(fe=0) %}
 {% for f in feeders %}{% set fns.fe = fns.fe + f.entries %}{% endfor %}
 
-<div class="phero rise" style="--ph:#7c5cff">
-  <h2>
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Agent Fleet</span>
+  <h2 style="margin-top:12px">
     <span class="ph-icon">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="2.6"/><circle cx="6" cy="12" r="2.6"/><circle cx="18" cy="19" r="2.6"/><line x1="8.3" y1="10.6" x2="15.7" y2="6.4"/><line x1="8.3" y1="13.4" x2="15.7" y2="17.6"/></svg>
     </span>

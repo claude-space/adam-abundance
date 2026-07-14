@@ -5,8 +5,9 @@
 {% set total_users = users|length %}
 {% set admin_ct = (role_counts.get('global_admin', 0) or 0) + (role_counts.get('portfolio_admin', 0) or 0) %}
 
-<div class="phero rise" style="--ph:#7c5cff">
-  <h2>
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Access</span>
+  <h2 style="margin-top:12px">
     <span class="ph-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
     Users &amp; roles
   </h2>
