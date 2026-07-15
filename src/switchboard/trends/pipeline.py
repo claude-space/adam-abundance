@@ -53,6 +53,12 @@ async def approve_and_start(ctx: RunContext, pipeline_id: int, approver: str, *,
     if pipeline.trend is not None and pipeline.trend.status not in TREND_OPEN_STATUSES:
         raise LifecycleError(
             f"trend is {pipeline.trend.status!r} — decline or close this request instead")
+    # Production suppression gate (§16.2): refuse to start content for a fading
+    # trend. Soft + overridable — lift suppression on the trend to proceed.
+    if pipeline.trend is not None and getattr(pipeline.trend, "suppressed", False):
+        raise LifecycleError(
+            f"trend is suppressed (state={pipeline.trend.state!r}) — its activity is fading. "
+            "Lift suppression on the trend to override, then approve.")
     pipeline = await repo.approve(pipeline_id, approver,
                                   content_types=content_types, instructions=instructions)
     transports = ctx.settings.trends
