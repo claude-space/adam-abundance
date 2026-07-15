@@ -94,16 +94,23 @@
     <h3>AI vs. human <span class="hint muted">accepted pipelines</span></h3>
     {% if not may_see_pay %}
       <div class="empty"><div class="e-icon">🔒</div>Access-controlled — the AI-vs-human cost comparison is visible to portfolio/global admins only.</div>
-    {% elif pipeline_cost.count %}
+    {% elif not pipeline_cost.count %}
+      <div class="empty"><div class="e-icon">◇</div>No costed pipelines in range yet.<br>
+        <span style="font-size:12px">Populates once accepted pipelines complete a publish.</span></div>
+    {% elif pipeline_cost.with_baseline %}
       <div class="mini-kpis">
-        <div><div class="v">${{ '%.0f'|format(pipeline_cost.ai_usd) }}</div><div class="l">AI cost</div></div>
+        <div><div class="v">${{ '%.2f'|format(pipeline_cost.ai_usd) }}</div><div class="l">AI cost · {{ pipeline_cost.count }} pipeline{{ '' if pipeline_cost.count==1 else 's' }}</div></div>
         <div><div class="v">${{ '%.0f'|format(pipeline_cost.human_usd) }}</div><div class="l">Human equiv.</div></div>
         <div><div class="v" style="color:{{ 'var(--good)' if pipeline_cost.savings_usd>=0 else 'var(--bad)' }}">${{ '%.0f'|format(pipeline_cost.savings_usd) }}</div><div class="l">Delta</div></div>
       </div>
       <p class="muted" style="font-size:11.5px;margin-top:10px">A cost lens, not a verdict — it excludes editorial review time, quality/liability, and topic-assignment effects.</p>
     {% else %}
-      <div class="empty"><div class="e-icon">◇</div>No costed pipelines in range yet.<br>
-        <span style="font-size:12px">Populates once accepted pipelines complete and <code>writer_pay_baseline</code> rates are set.</span></div>
+      <div class="mini-kpis">
+        <div><div class="v">${{ '%.2f'|format(pipeline_cost.ai_usd) }}</div><div class="l">AI cost · {{ pipeline_cost.count }} pipeline{{ '' if pipeline_cost.count==1 else 's' }}</div></div>
+        <div><div class="v muted">—</div><div class="l">Human equiv.</div></div>
+        <div><div class="v muted">—</div><div class="l">Delta</div></div>
+      </div>
+      <p class="muted" style="font-size:11.5px;margin-top:10px">AI cost is metered; the human comparison stays hidden until <code>writer_pay_baseline</code> rates are set for the brand.</p>
     {% endif %}
   </div>
 </div>

@@ -1022,10 +1022,14 @@ async def expenditure_page(request: Request):
         pc = (await ctx.session.execute(
             select(func.count(), func.coalesce(func.sum(PipelineCost.total_usd), 0.0),
                    func.coalesce(func.sum(PipelineCost.human_equiv_usd), 0.0),
-                   func.coalesce(func.sum(PipelineCost.savings_usd), 0.0))
+                   func.coalesce(func.sum(PipelineCost.savings_usd), 0.0),
+                   func.count(PipelineCost.human_equiv_usd))
             .where(PipelineCost.completed_at >= since_dt))).one()
+        # `with_baseline` = rows that have a human pay rate; lets the panel show the
+        # AI-vs-human delta only when it's real, and "awaiting rates" otherwise.
         pipeline_cost = {"count": int(pc[0]), "ai_usd": round(float(pc[1]), 2),
-                         "human_usd": round(float(pc[2]), 2), "savings_usd": round(float(pc[3]), 2)}
+                         "human_usd": round(float(pc[2]), 2), "savings_usd": round(float(pc[3]), 2),
+                         "with_baseline": int(pc[4])}
 
     return templates.TemplateResponse(request, "expenditure.html",
                                       {"user": user, "days": days, "total_usd": total_usd,
