@@ -61,6 +61,18 @@ class TrendStatus(str, Enum):
     COMPLETED = "completed"              # a pipeline ran to published/closed
 
 
+class TrendState(str, Enum):
+    """Activity lifecycle of a trend (PRD §16.2) — distinct from ``TrendStatus``
+    (the action/pipeline lifecycle). Tracks whether interest is emerging,
+    growing, at peak, fading, or gone; drives soft auto-suppression."""
+
+    EMERGING = "emerging"
+    RISING = "rising"
+    PEAK = "peak"
+    DECLINING = "declining"              # sustained downtrend -> auto-suppress (unless evergreen)
+    DORMANT = "dormant"                  # activity at/near zero
+
+
 class PipelineStatus(str, Enum):
     """Lifecycle of a content-pipeline trigger request."""
 

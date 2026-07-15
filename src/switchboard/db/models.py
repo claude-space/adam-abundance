@@ -163,6 +163,14 @@ class Trend(Base):
     dossier_ref: Mapped[dict | None] = mapped_column(JSONB)      # artifact pointer for rendered dossier
     status: Mapped[str] = mapped_column(Text, nullable=False, default="detected", server_default="detected")
     origin: Mapped[str] = mapped_column(Text, nullable=False, default="scout", server_default="scout")  # scout|manual
+    # Activity lifecycle (PRD §16.2) — distinct from `status` (the action/pipeline
+    # lifecycle). Tracks emerging → rising → peak → declining → dormant, with soft,
+    # forward-only auto-suppression of fading trends (never unpublishes).
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="emerging", server_default="emerging")
+    suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    suppressed_by: Mapped[str | None] = mapped_column(Text)   # NULL = auto; else the human/agent that confirmed
+    evergreen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    peak_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -183,6 +191,36 @@ class Trend(Base):
 
     def __repr__(self) -> str:
         return f"<Trend id={self.id} brand={self.brand} score={self.score:.0f} status={self.status}>"
+
+
+class TrendActivity(Base):
+    """Daily activity sample for a tracked trend (PRD §16.2): external interest +
+    on-site performance of tied articles. The series backs state detection."""
+
+    __tablename__ = "trend_activity"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trend_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("trend.id", ondelete="CASCADE"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    external_score: Mapped[float | None] = mapped_column(Float)     # Trends/SerpAPI interest, 0..100
+    onsite_sessions: Mapped[int | None] = mapped_column(BigInteger)  # sessions of tied articles
+    article_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_trend_activity_day", "trend_id", "as_of", unique=True),)
+
+
+class TrendArticle(Base):
+    """Maps a published article URL to the trend it belongs to (PRD §16.2), so
+    suppression and attribution can find tied content."""
+
+    __tablename__ = "trend_article"
+
+    trend_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("trend.id", ondelete="CASCADE"), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ContentPipeline(Base):
