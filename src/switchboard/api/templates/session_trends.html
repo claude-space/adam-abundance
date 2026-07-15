@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}Session Trends — Switchboard{% endblock %}
+{% block body %}
+{% set LABELS = {"visits":"Visits","averageEngagedDepth":"Engaged depth","averageEngagedDuration":"Engaged duration"} %}
+{% set UNITS = {"visits":"","averageEngagedDepth":"%","averageEngagedDuration":"s"} %}
+
+<style>
+  .st-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:16px; }
+  .st-card{ background:var(--surface); border:1px solid var(--line-2); border-radius:var(--radius-lg); padding:16px; }
+  .st-head{ display:flex; justify-content:space-between; align-items:center; }
+  .st-name{ font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+  .st-wow{ font-family:var(--font-mono); font-size:11px; font-weight:700; padding:2px 9px; border-radius:999px; }
+  .st-wow.up{ color:var(--good); background:color-mix(in srgb,var(--good) 12%,transparent); }
+  .st-wow.down{ color:var(--bad); background:color-mix(in srgb,var(--bad) 12%,transparent); }
+  .st-weekly{ font-family:var(--font-mono); font-size:26px; font-weight:800; color:var(--ink); margin-top:8px; }
+  .st-sub{ font-size:11.5px; margin-top:2px; }
+  .st-chart{ display:flex; align-items:flex-end; gap:6px; height:112px; margin-top:14px; padding-top:8px; border-top:1px solid var(--line); }
+  .st-bar-wrap{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; gap:5px; }
+  .st-bar{ width:100%; max-width:26px; border-radius:4px 4px 0 0; background:color-mix(in srgb,var(--accent) 42%,transparent); }
+  .st-bar.peak{ background:var(--accent); }
+  .st-day{ font-family:var(--font-mono); font-size:9px; color:var(--muted); }
+</style>
+
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Analytics</span>
+  <h2 style="margin-top:12px">
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg>
+    </span>
+    Session trends
+  </h2>
+  <div class="ph-sub">Weekly rollup with the day-by-day rises and dips in visits and engagement, per brand.</div>
+</div>
+
+<div class="panel rise-2">
+  <form method="get" action="/session-trends" class="toolbar">
+    <label>Brand<br>
+      <select name="brand" onchange="this.form.submit()">
+        {% for b in brands %}<option value="{{ b }}" {{ 'selected' if b==sel_brand }}>{{ b }}</option>{% endfor %}
+      </select></label>
+    <label>ISO week<br>
+      <select name="week" onchange="this.form.submit()">
+        {% for w in weeks %}<option value="{{ w }}" {{ 'selected' if w==sel_week }}>{{ w }}</option>{% endfor %}
+      </select></label>
+    <noscript><button type="submit">View</button></noscript>
+    {% if current %}<span class="muted" style="align-self:center;font-size:12px">week of {{ current.week_start }}</span>{% endif %}
+  </form>
+</div>
+
+{% if current %}
+<div class="st-grid rise-3">
+  {% for key, m in current.metrics.items() %}
+  {% set vals = m.series | map(attribute='value') | reject('none') | list %}
+  {% set maxv = (vals | max) if vals else 0 %}
+  <div class="st-card">
+    <div class="st-head">
+      <span class="st-name">{{ LABELS.get(key, key) }}</span>
+      {% if m.wow_pct is not none %}
+        <span class="st-wow {{ 'up' if m.wow_pct >= 0 else 'down' }}">{{ '▲' if m.wow_pct >= 0 else '▼' }} {{ m.wow_pct|abs }}%</span>
+      {% else %}<span class="muted" style="font-size:11px">no prior week</span>{% endif %}
+    </div>
+    <div class="st-weekly">{{ '%g'|format(m.weekly) }}{{ UNITS.get(key, '') }}</div>
+    <div class="st-sub muted">week total{% if m.prev_weekly %} · prior {{ '%g'|format(m.prev_weekly) }}{{ UNITS.get(key, '') }}{% endif %}</div>
+    <div class="st-chart">
+      {% for pt in m.series %}
+      {% set ispeak = m.peak and pt.date == m.peak.date and pt.value %}
+      <div class="st-bar-wrap" title="{{ pt.date }}: {{ pt.value if pt.value is not none else '—' }}">
+        <div class="st-bar {{ 'peak' if ispeak else '' }}"
+             style="height:{{ [((pt.value / maxv * 100) if (pt.value is not none and maxv) else 0), 3]|max if pt.value is not none else 0 }}%"></div>
+        <div class="st-day">{{ pt.date[5:] }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+{% if current.flags %}
+<div class="panel rise-4" style="border-left:3px solid var(--warn)">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    Notable movements <span class="hint muted">≥ {{ current.threshold_pct }}% — surfaced to the plan</span>
+  </h3>
+  <ul style="margin:0;padding-left:20px;color:var(--ink-2);line-height:1.8">
+    {% for f in current.flags %}
+    <li><b>{{ LABELS.get(f.metric, f.metric) }}</b> {{ 'week-over-week' if f.kind=='wow' else 'day-over-day' }}
+        <span style="color:{{ 'var(--good)' if f.direction=='up' else 'var(--bad)' }}">{{ f.pct }}%</span>
+        {%- if f.date %} on {{ f.date }}{% endif %}</li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% else %}
+<div class="panel rise-3">
+  <div class="empty"><div class="e-icon">◔</div>
+    No session-trend data yet.<br>
+    <span style="font-size:12.5px">Analytics writes it each run from Sentinel's daily traffic — run a cycle (or the analytics observe) for a brand to populate the weekly rollup + daily series.</span>
+  </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -6,7 +6,7 @@ pipeline's audit timeline (``events``)."""
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Sequence
 
 from sqlalchemy import select, text, update
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db.enums import ContentJobStatus, PipelineStatus, TrendStatus
-from ..db.models import ContentJob, ContentPipeline, Trend
+from ..db.models import ContentJob, ContentPipeline, Trend, TrendActivity
 from ..logging_ import get_logger
 from .lifecycle import (
     PIPELINE_OPEN_STATUSES,
@@ -177,6 +177,61 @@ class TrendRepo:
             text("SELECT status, COUNT(*) FROM trend GROUP BY status")
         )).all()
         return {status: int(n) for status, n in rows}
+
+    # -- activity lifecycle (PRD §16.2) ---------------------------------------
+
+    async def record_activity(self, trend_id: int, as_of: date, *,
+                              external_score: float | None = None,
+                              onsite_sessions: int | None = None,
+                              article_count: int | None = None) -> None:
+        """Upsert one daily activity sample for a trend (idempotent per day)."""
+        existing = (await self.session.execute(
+            select(TrendActivity).where(TrendActivity.trend_id == trend_id,
+                                        TrendActivity.as_of == as_of)
+        )).scalar_one_or_none()
+        if existing is not None:
+            existing.external_score = external_score
+            existing.onsite_sessions = onsite_sessions
+            existing.article_count = article_count
+        else:
+            self.session.add(TrendActivity(
+                trend_id=trend_id, as_of=as_of, external_score=external_score,
+                onsite_sessions=onsite_sessions, article_count=article_count))
+        await self.session.flush()
+
+    async def activity_series(self, trend_id: int, *, days: int = 21) -> list[dict[str, Any]]:
+        """Recent activity samples, oldest → newest, for the state machine."""
+        since = _now().date() - timedelta(days=days)
+        rows = (await self.session.execute(
+            select(TrendActivity).where(TrendActivity.trend_id == trend_id,
+                                        TrendActivity.as_of >= since)
+            .order_by(TrendActivity.as_of.asc())
+        )).scalars().all()
+        return [{"as_of": r.as_of.isoformat(), "external_score": r.external_score,
+                 "onsite_sessions": r.onsite_sessions} for r in rows]
+
+    async def set_lifecycle(self, trend_id: int, state: str, suppressed: bool, *,
+                            peak_at: datetime | None = None) -> None:
+        """Update the trend's activity state. Auto-manage suppression only when a
+        human hasn't set it (suppressed_by NULL) — human overrides are sticky.
+        Records peak_at once (first time it hits peak)."""
+        trend = await self.session.get(Trend, trend_id)
+        if trend is None:
+            return
+        trend.state = state
+        if peak_at is not None and trend.peak_at is None:
+            trend.peak_at = peak_at
+        if trend.suppressed_by is None:
+            trend.suppressed = suppressed
+        await self.session.flush()
+
+    async def list_for_lifecycle(self, brand: str, *, limit: int = 100) -> list[Trend]:
+        """Trends worth monitoring (non-terminal + completed), most-recent first."""
+        monitor = [TrendStatus.DETECTED.value, TrendStatus.DOSSIER_BUILDING.value,
+                   TrendStatus.PROPOSED.value, TrendStatus.APPROVED.value, TrendStatus.COMPLETED.value]
+        stmt = (select(Trend).where(Trend.brand == brand, Trend.status.in_(monitor))
+                .order_by(Trend.last_seen_at.desc().nullslast()).limit(limit))
+        return list((await self.session.execute(stmt)).scalars().all())
 
 
 class PipelineRepo:

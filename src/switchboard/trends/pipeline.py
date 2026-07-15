@@ -53,6 +53,12 @@ async def approve_and_start(ctx: RunContext, pipeline_id: int, approver: str, *,
     if pipeline.trend is not None and pipeline.trend.status not in TREND_OPEN_STATUSES:
         raise LifecycleError(
             f"trend is {pipeline.trend.status!r} — decline or close this request instead")
+    # Production suppression gate (§16.2): refuse to start content for a fading
+    # trend. Soft + overridable — lift suppression on the trend to proceed.
+    if pipeline.trend is not None and getattr(pipeline.trend, "suppressed", False):
+        raise LifecycleError(
+            f"trend is suppressed (state={pipeline.trend.state!r}) — its activity is fading. "
+            "Lift suppression on the trend to override, then approve.")
     pipeline = await repo.approve(pipeline_id, approver,
                                   content_types=content_types, instructions=instructions)
     transports = ctx.settings.trends
@@ -251,9 +257,19 @@ async def publish_job(ctx: RunContext, job_id: int, actor: str) -> ContentJob:
                  "approved_by": actor, "result": result_ref},
     ))
     await repo.refresh_rollup(pipeline.id)
-    if pipeline.trend_id is not None and pipeline.status in (
-            PipelineStatus.PUBLISHED.value, PipelineStatus.PARTIALLY_PUBLISHED.value):
-        await TrendRepo(ctx.session).set_status(pipeline.trend_id, "completed")
+    if pipeline.status in (PipelineStatus.PUBLISHED.value,
+                           PipelineStatus.PARTIALLY_PUBLISHED.value):
+        if pipeline.trend_id is not None:
+            await TrendRepo(ctx.session).set_status(pipeline.trend_id, "completed")
+        # Roll this pipeline's metered LLM spend up to one PipelineCost row in USD
+        # (§16.4) so the Expenditure AI-vs-human panel can read it. Best-effort:
+        # a rollup failure must never block a completed publish.
+        try:
+            fresh = await repo.get(pipeline.id)   # reload so .jobs is populated
+            if fresh is not None:
+                await _record_pipeline_cost(ctx, fresh)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[pipeline] pipeline_cost rollup failed for %s: %s", pipeline.id, exc)
     headline = pipeline.trend.headline if pipeline.trend else f"pipeline #{pipeline.id}"
     await notify_trend_event(ctx, pipeline.brand, "content_published",
                              headline=headline, trend_id=pipeline.trend_id,
@@ -293,3 +309,81 @@ async def _emaki_push(ctx: RunContext, brand: str, job: ContentJob) -> dict[str,
         brand=brand, request={"topic_id": topic_id}, ok=True,
     )
     return {"mode": "emaki_unpublished_draft", "topic_id": topic_id, "accepted": accepted}
+
+
+# -- cost rollup (§16.4) -----------------------------------------------------------
+
+async def _record_pipeline_cost(ctx: RunContext, pipeline: ContentPipeline) -> None:
+    """Upsert one PipelineCost row summing this pipeline's metered LLM spend in
+    USD. Idempotent per pipeline (a PARTIALLY_PUBLISHED → PUBLISHED transition
+    just refreshes the same row). The human-equivalent is filled ONLY when a
+    ``writer_pay_baseline`` rate exists for the brand — until Andrew provides
+    rates it stays NULL, and the Expenditure panel shows its awaiting state
+    rather than a fabricated saving."""
+    from sqlalchemy import select
+
+    from .. import pricing
+    from ..db.models import PipelineCost
+
+    micros = 0
+    words = 0
+    used_profile = False
+    for job in pipeline.jobs:
+        if job.cost:
+            micros += int(job.cost.get("llm_micros") or 0)
+        meta = job.preview_meta or {}
+        words += int(meta.get("word_count") or 0)
+        # Phase 9b will stamp this on generation; false for every job until then.
+        used_profile = used_profile or bool(meta.get("used_style_profile"))
+
+    llm_usd = pricing.metric_to_usd("llm_micros", micros)
+    total_usd = round(llm_usd, 6)
+    # The pipeline itself only spends LLM (research/ahrefs live upstream in the
+    # scout and are not attributable to this publish), so the other lanes are 0.
+    breakdown = {"llm_usd": total_usd, "ahrefs_usd": 0.0, "bq_usd": 0.0, "other_usd": 0.0}
+
+    human_equiv = await _human_equiv_usd(ctx.session, pipeline.brand, words)
+    savings = round(human_equiv - total_usd, 2) if human_equiv is not None else None
+
+    run_id = f"pipeline:{pipeline.id}"
+    existing = (await ctx.session.execute(
+        select(PipelineCost).where(PipelineCost.pipeline_run_id == run_id)
+    )).scalar_one_or_none()
+    if existing is None:
+        ctx.session.add(PipelineCost(
+            pipeline_run_id=run_id, brand=pipeline.brand, article_url=None,
+            action_type="trend_pipeline", used_style_profile=used_profile,
+            style_profile_id=None, cost_breakdown=breakdown, total_usd=total_usd,
+            human_equiv_usd=human_equiv, savings_usd=savings,
+        ))
+    else:
+        existing.cost_breakdown = breakdown
+        existing.total_usd = total_usd
+        existing.human_equiv_usd = human_equiv
+        existing.savings_usd = savings
+        existing.used_style_profile = used_profile
+        existing.completed_at = datetime.now(timezone.utc)
+    await ctx.session.flush()
+
+
+async def _human_equiv_usd(session: Any, brand: str, words: int) -> float | None:
+    """The brand's human-writer pay baseline for one article, or None when no
+    rate is configured. Prefers a flat per-article rate; falls back to
+    per-word × the article's word count."""
+    from sqlalchemy import select
+
+    from ..db.models import WriterPayBaseline
+
+    row = (await session.execute(
+        select(WriterPayBaseline)
+        .where(WriterPayBaseline.brand == brand, WriterPayBaseline.author.is_(None))
+        .order_by(WriterPayBaseline.effective_at.desc())
+        .limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        return None
+    if row.usd_per_article is not None:
+        return round(float(row.usd_per_article), 2)
+    if row.usd_per_word is not None and words:
+        return round(float(row.usd_per_word) * words, 2)
+    return None

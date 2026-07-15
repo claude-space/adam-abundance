@@ -110,12 +110,14 @@ class TrendScout:
                 summary["suppressed"] += 1
                 continue
             summary["new_trends" if created else "updated_trends"] += 1
+            # Opportunity suppression gate (§16.2): never propose a fading trend.
             if (trend.status == TrendStatus.DETECTED.value and score >= cfg.score_threshold
-                    and proposals_left > 0):
+                    and not trend.suppressed and proposals_left > 0):
                 if await self._propose(trend):
                     summary["proposed"] += 1
                     proposals_left -= 1
 
+        summary["lifecycle_declined"] = await self._update_lifecycle(brand)
         log.info("[scout] scan done: %s", summary)
         return summary
 
@@ -200,6 +202,47 @@ class TrendScout:
                     log.info("[scout] hc-viral corroboration fetch failed (%s): %s", brand, exc)
             titles.extend(r.get("title", "") for r in rows if r.get("title"))
         return [t for t in titles if t]
+
+    async def _update_lifecycle(self, brand: str) -> int:
+        """Record today's activity for the brand's tracked trends, recompute each
+        one's state, and auto-suppress fading ones (§16.2). Returns the count that
+        newly flipped to `declining`. Idempotent per day."""
+        from datetime import date, datetime, timezone
+
+        from ..db.enums import TrendState
+        from .monitor import compute_trend_state
+
+        today = date.today()
+        now = datetime.now(timezone.utc)
+        flipped = 0
+        for t in await self.trends.list_for_lifecycle(brand):
+            # External-interest proxy from the activity we actually observe in our
+            # sources (breadth + volume + velocity), 0..100. Upgradeable to a real
+            # Trends/SerpAPI interest-over-time series later (§13.19).
+            ext = min(100.0, round((t.velocity or 0.0) * 6.0
+                                   + (t.source_count or 0) * 6.0
+                                   + (t.signal_count or 0) * 1.5, 1))
+            await self.trends.record_activity(
+                t.id, today, external_score=ext,
+                article_count=(len(t.evidence) if t.evidence else None))
+            res = compute_trend_state(await self.trends.activity_series(t.id), evergreen=t.evergreen)
+            peak_at = now if (res["state"] == TrendState.PEAK.value and t.peak_at is None) else None
+            was = t.state
+            await self.trends.set_lifecycle(t.id, res["state"], res["suppressed"], peak_at=peak_at)
+            if res["state"] == TrendState.DECLINING.value and was != TrendState.DECLINING.value:
+                flipped += 1
+                await self._write_lifecycle_flag(t, res)
+        return flipped
+
+    async def _write_lifecycle_flag(self, trend: Trend, res: dict[str, Any]) -> None:
+        """Surface a newly-declining trend to the morning plan."""
+        await self.ctx.store.write(EntryDraft(
+            type=EntryType.FLAG, brand=trend.brand, source_agent="trend_scout",
+            source_system="trend_monitor",
+            payload={"kind": "trend_declining", "trend_id": trend.id, "headline": trend.headline,
+                     "state": res["state"], "delta_pct": res.get("delta_pct"),
+                     "suppressed": res["suppressed"], "severity": "medium"},
+            ttl_seconds=7 * 24 * 3600))
 
     async def _propose(self, trend: Trend) -> bool:
         """Turn a hot trend into a pending trigger request + dossier + notify."""

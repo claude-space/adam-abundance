@@ -163,6 +163,14 @@ class Trend(Base):
     dossier_ref: Mapped[dict | None] = mapped_column(JSONB)      # artifact pointer for rendered dossier
     status: Mapped[str] = mapped_column(Text, nullable=False, default="detected", server_default="detected")
     origin: Mapped[str] = mapped_column(Text, nullable=False, default="scout", server_default="scout")  # scout|manual
+    # Activity lifecycle (PRD §16.2) — distinct from `status` (the action/pipeline
+    # lifecycle). Tracks emerging → rising → peak → declining → dormant, with soft,
+    # forward-only auto-suppression of fading trends (never unpublishes).
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="emerging", server_default="emerging")
+    suppressed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    suppressed_by: Mapped[str | None] = mapped_column(Text)   # NULL = auto; else the human/agent that confirmed
+    evergreen: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    peak_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -183,6 +191,36 @@ class Trend(Base):
 
     def __repr__(self) -> str:
         return f"<Trend id={self.id} brand={self.brand} score={self.score:.0f} status={self.status}>"
+
+
+class TrendActivity(Base):
+    """Daily activity sample for a tracked trend (PRD §16.2): external interest +
+    on-site performance of tied articles. The series backs state detection."""
+
+    __tablename__ = "trend_activity"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    trend_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("trend.id", ondelete="CASCADE"), nullable=False)
+    as_of: Mapped[date] = mapped_column(Date, nullable=False)
+    external_score: Mapped[float | None] = mapped_column(Float)     # Trends/SerpAPI interest, 0..100
+    onsite_sessions: Mapped[int | None] = mapped_column(BigInteger)  # sessions of tied articles
+    article_count: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_trend_activity_day", "trend_id", "as_of", unique=True),)
+
+
+class TrendArticle(Base):
+    """Maps a published article URL to the trend it belongs to (PRD §16.2), so
+    suppression and attribution can find tied content."""
+
+    __tablename__ = "trend_article"
+
+    trend_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("trend.id", ondelete="CASCADE"), primary_key=True)
+    url: Mapped[str] = mapped_column(Text, primary_key=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class ContentPipeline(Base):
@@ -318,3 +356,106 @@ class SpendLedger(Base):
     )
 
     __table_args__ = (Index("ix_spend_ledger_window_metric", "window_date", "metric"),)
+
+
+class WriterStats(Base):
+    """Per-writer performance in a window (PRD §16.3), normalized so top-writer
+    ranking controls for category/intent/recency rather than raw sessions."""
+
+    __tablename__ = "writer_stats"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[date] = mapped_column(Date, nullable=False)
+    window_end: Mapped[date] = mapped_column(Date, nullable=False)
+    article_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_sessions: Mapped[float] = mapped_column(Float, nullable=False)      # raw avg sessions/article
+    norm_score: Mapped[float] = mapped_column(Float, nullable=False)        # cohort-normalized (see writers.py)
+    is_top: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_writer_stats_window", "brand", "author", "window_start", "window_end", unique=True),)
+
+
+class WriterStyleProfile(Base):
+    """A per-brand aggregate style profile distilled from the top writers'
+    corpus (PRD §16.3). Versioned; one active per brand. Style layer only —
+    never a byline; the human fact-check/outline/QA gates stay mandatory."""
+
+    __tablename__ = "writer_style_profile"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_authors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False)          # extracted style features
+    exemplar_refs: Mapped[dict | None] = mapped_column(JSONB)              # artifact pointers to exemplars
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_writer_style_profile_version", "brand", "version", unique=True),)
+
+
+class PricingConfig(Base):
+    """USD pricing that turns raw usage into dollars (PRD §16.4). One source for
+    BOTH the governor's caps and the read-only Expenditure view."""
+
+    __tablename__ = "pricing_config"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)        # llm_input|llm_output|ahrefs_unit|bq_tb|api_call
+    key: Mapped[str | None] = mapped_column(Text)                  # model id / vendor where relevant
+    usd_per_unit: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_pricing_config_kind_key", "kind", "key"),)
+
+
+class WriterPayBaseline(Base):
+    """SENSITIVE, access-controlled (PRD §16.4 / §13.16): per-article/word human
+    pay rates, used only for the AI-vs-human cost comparison."""
+
+    __tablename__ = "writer_pay_baseline"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str | None] = mapped_column(Text)              # NULL = brand default rate
+    usd_per_article: Mapped[float | None] = mapped_column(Float)
+    usd_per_word: Mapped[float | None] = mapped_column(Float)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PipelineCost(Base):
+    """Rolled-up USD cost of one accepted pipeline (PRD §16.4). Sums the
+    associated tool_call_log costs; carries the human-equivalent + savings when a
+    writer-emulation profile produced the article."""
+
+    __tablename__ = "pipeline_cost"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pipeline_run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    article_url: Mapped[str | None] = mapped_column(Text)
+    action_type: Mapped[str | None] = mapped_column(Text)
+    used_style_profile: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    style_profile_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("writer_style_profile.id", ondelete="SET NULL")
+    )
+    cost_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False)   # {llm_usd, ahrefs_usd, bq_usd, other_usd}
+    total_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    human_equiv_usd: Mapped[float | None] = mapped_column(Float)
+    savings_usd: Mapped[float | None] = mapped_column(Float)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_pipeline_cost_brand_completed", "brand", "completed_at"),)

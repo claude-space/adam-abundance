@@ -933,6 +933,111 @@ async def systems_page(request: Request):
                                        "consolidation": CONSOLIDATION, "decisions": DECISIONS})
 
 
+@router.get("/session-trends", response_class=HTMLResponse)
+async def session_trends_page(request: Request):
+    """Article session trends (PRD §16.1): weekly rollup + daily series per brand,
+    read from the `session_trends` metric entries Analytics writes each run."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    sel_brand = request.query_params.get("brand") or ""
+    sel_week = request.query_params.get("week") or ""
+    async with RunContext.open() as ctx:
+        entries = await ctx.store.query(
+            types=[EntryType.METRIC], payload_contains={"kind": "session_trends"},
+            fresh_within_seconds=90 * 24 * 3600, limit=300)
+    # newest-first; keep the freshest payload per (brand, iso_week)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in entries:
+        p = e.payload or {}
+        key = (p.get("brand", e.brand), p.get("iso_week") or "")
+        latest.setdefault(key, p)
+    options = sorted(latest.keys(), reverse=True)   # (brand, iso_week), newest weeks first
+    brands = sorted({b for b, _ in options})
+    if not sel_brand and options:
+        sel_brand = options[0][0]
+    weeks = [w for b, w in options if b == sel_brand]
+    if (sel_brand, sel_week) not in latest:
+        sel_week = weeks[0] if weeks else ""
+    current = latest.get((sel_brand, sel_week))
+    return templates.TemplateResponse(request, "session_trends.html",
+                                      {"user": user, "current": current, "brands": brands,
+                                       "weeks": weeks, "sel_brand": sel_brand, "sel_week": sel_week,
+                                       "has_any": bool(latest)})
+
+
+@router.get("/expenditure", response_class=HTMLResponse)
+async def expenditure_page(request: Request):
+    """Expenditure (PRD §16.4): total AI spend priced to USD from the same ledger
+    the governor caps — by source, agent, and day — plus the AI-vs-human rollup
+    (privileged view) once pipeline costs + writer-pay rates exist."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    from datetime import date, datetime, timedelta, timezone
+
+    from .. import pricing
+    from ..db.models import PipelineCost, SpendLedger
+
+    try:
+        days = int(request.query_params.get("days") or 30)
+    except ValueError:
+        days = 30
+    if days not in (7, 30, 90, 365):
+        days = 30
+    since = date.today() - timedelta(days=days)
+    may_see_pay = user.get("role") in ("global_admin", "portfolio_admin")
+
+    async with RunContext.open() as ctx:
+        rates = await pricing.load_rates(ctx.session)
+
+        def _usd(metric: str, amt: Any) -> float:
+            return pricing.metric_to_usd(metric, amt or 0, bq_tb=rates["bq_tb"], ahrefs_unit=rates["ahrefs_unit"])
+
+        src = (await ctx.session.execute(
+            select(SpendLedger.metric, func.sum(SpendLedger.amount))
+            .where(SpendLedger.window_date >= since).group_by(SpendLedger.metric))).all()
+        by_source = sorted(({"metric": m, "amount": int(a or 0), "usd": round(_usd(m, a), 4)} for m, a in src),
+                           key=lambda x: x["usd"], reverse=True)
+        total_usd = round(sum(x["usd"] for x in by_source), 4)
+
+        ag = (await ctx.session.execute(
+            select(SpendLedger.agent, SpendLedger.metric, func.sum(SpendLedger.amount))
+            .where(SpendLedger.window_date >= since).group_by(SpendLedger.agent, SpendLedger.metric))).all()
+        agent_usd: dict[str, float] = {}
+        for a, m, amt in ag:
+            agent_usd[a or "—"] = agent_usd.get(a or "—", 0.0) + _usd(m, amt)
+        by_agent = sorted(({"agent": a, "usd": round(u, 4)} for a, u in agent_usd.items()),
+                          key=lambda x: x["usd"], reverse=True)
+
+        dd = (await ctx.session.execute(
+            select(SpendLedger.window_date, SpendLedger.metric, func.sum(SpendLedger.amount))
+            .where(SpendLedger.window_date >= since).group_by(SpendLedger.window_date, SpendLedger.metric))).all()
+        day_usd: dict[Any, float] = {}
+        for d, m, amt in dd:
+            day_usd[d] = day_usd.get(d, 0.0) + _usd(m, amt)
+        series = [{"date": d.isoformat(), "usd": round(u, 4)} for d, u in sorted(day_usd.items())]
+
+        since_dt = datetime(since.year, since.month, since.day, tzinfo=timezone.utc)
+        pc = (await ctx.session.execute(
+            select(func.count(), func.coalesce(func.sum(PipelineCost.total_usd), 0.0),
+                   func.coalesce(func.sum(PipelineCost.human_equiv_usd), 0.0),
+                   func.coalesce(func.sum(PipelineCost.savings_usd), 0.0),
+                   func.count(PipelineCost.human_equiv_usd))
+            .where(PipelineCost.completed_at >= since_dt))).one()
+        # `with_baseline` = rows that have a human pay rate; lets the panel show the
+        # AI-vs-human delta only when it's real, and "awaiting rates" otherwise.
+        pipeline_cost = {"count": int(pc[0]), "ai_usd": round(float(pc[1]), 2),
+                         "human_usd": round(float(pc[2]), 2), "savings_usd": round(float(pc[3]), 2),
+                         "with_baseline": int(pc[4])}
+
+    return templates.TemplateResponse(request, "expenditure.html",
+                                      {"user": user, "days": days, "total_usd": total_usd,
+                                       "by_source": by_source, "by_agent": by_agent, "series": series,
+                                       "pipeline_cost": pipeline_cost, "rates": rates,
+                                       "may_see_pay": may_see_pay})
+
+
 @router.get("/distribution", response_class=HTMLResponse)
 async def distribution_page(request: Request):
     """Review the assembled outbound artifacts (PRD §6.6 / §2 success scenario).
