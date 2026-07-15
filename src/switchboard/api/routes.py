@@ -933,6 +933,39 @@ async def systems_page(request: Request):
                                        "consolidation": CONSOLIDATION, "decisions": DECISIONS})
 
 
+@router.get("/session-trends", response_class=HTMLResponse)
+async def session_trends_page(request: Request):
+    """Article session trends (PRD §16.1): weekly rollup + daily series per brand,
+    read from the `session_trends` metric entries Analytics writes each run."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    sel_brand = request.query_params.get("brand") or ""
+    sel_week = request.query_params.get("week") or ""
+    async with RunContext.open() as ctx:
+        entries = await ctx.store.query(
+            types=[EntryType.METRIC], payload_contains={"kind": "session_trends"},
+            fresh_within_seconds=90 * 24 * 3600, limit=300)
+    # newest-first; keep the freshest payload per (brand, iso_week)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for e in entries:
+        p = e.payload or {}
+        key = (p.get("brand", e.brand), p.get("iso_week") or "")
+        latest.setdefault(key, p)
+    options = sorted(latest.keys(), reverse=True)   # (brand, iso_week), newest weeks first
+    brands = sorted({b for b, _ in options})
+    if not sel_brand and options:
+        sel_brand = options[0][0]
+    weeks = [w for b, w in options if b == sel_brand]
+    if (sel_brand, sel_week) not in latest:
+        sel_week = weeks[0] if weeks else ""
+    current = latest.get((sel_brand, sel_week))
+    return templates.TemplateResponse(request, "session_trends.html",
+                                      {"user": user, "current": current, "brands": brands,
+                                       "weeks": weeks, "sel_brand": sel_brand, "sel_week": sel_week,
+                                       "has_any": bool(latest)})
+
+
 @router.get("/distribution", response_class=HTMLResponse)
 async def distribution_page(request: Request):
     """Review the assembled outbound artifacts (PRD §6.6 / §2 success scenario).
