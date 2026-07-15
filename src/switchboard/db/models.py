@@ -356,3 +356,46 @@ class SpendLedger(Base):
     )
 
     __table_args__ = (Index("ix_spend_ledger_window_metric", "window_date", "metric"),)
+
+
+class WriterStats(Base):
+    """Per-writer performance in a window (PRD §16.3), normalized so top-writer
+    ranking controls for category/intent/recency rather than raw sessions."""
+
+    __tablename__ = "writer_stats"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(Text, nullable=False)
+    window_start: Mapped[date] = mapped_column(Date, nullable=False)
+    window_end: Mapped[date] = mapped_column(Date, nullable=False)
+    article_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_sessions: Mapped[float] = mapped_column(Float, nullable=False)      # raw avg sessions/article
+    norm_score: Mapped[float] = mapped_column(Float, nullable=False)        # cohort-normalized (see writers.py)
+    is_top: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_writer_stats_window", "brand", "author", "window_start", "window_end", unique=True),)
+
+
+class WriterStyleProfile(Base):
+    """A per-brand aggregate style profile distilled from the top writers'
+    corpus (PRD §16.3). Versioned; one active per brand. Style layer only —
+    never a byline; the human fact-check/outline/QA gates stay mandatory."""
+
+    __tablename__ = "writer_style_profile"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_authors: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False)          # extracted style features
+    exemplar_refs: Mapped[dict | None] = mapped_column(JSONB)              # artifact pointers to exemplars
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("uq_writer_style_profile_version", "brand", "version", unique=True),)
