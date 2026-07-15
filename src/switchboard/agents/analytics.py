@@ -20,7 +20,83 @@ class AnalyticsAgent(BaseAgent):
         written = await super().observe(brand)
         written += await self._rollup(brand)
         written += await self._session_trends(brand)
+        written += await self._writer_stats(brand)
         return written
+
+    # -- top-writer stats (PRD §16.3) ----------------------------------------
+
+    async def _writer_stats(self, brand: str) -> int:
+        """Cohort-normalized writer_stats for the window from the consum table +
+        top-N flagging (§16.3). Soft-fails when BigQuery is unavailable."""
+        if brand == "portfolio":
+            return 0
+        from datetime import date, timedelta
+
+        from sqlalchemy import delete as _delete
+
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from ..db.models import WriterStats
+        from ..writers import normalize_writers
+
+        def _int(key: str, default: int) -> int:
+            try:
+                return int(self.ctx.creds.resolve(key, secret=False) or default)
+            except ValueError:
+                return default
+        window_days = _int("WRITER_STATS_WINDOW_DAYS", 90)
+        top_n = _int("WRITER_TOP_N", 10)
+        min_articles = _int("WRITER_MIN_ARTICLES", 5)
+
+        bc = self.ctx.settings.brand(brand)
+        try:
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except AdapterUnavailable:
+            return 0
+        sql = f"""
+            SELECT Writer AS author, PriCat AS category, Intent AS intent,
+                   COALESCE(ActSessSentinel, 0) AS sessions
+            FROM {_CONSUM_TABLE}
+            WHERE Brand=@brand AND Writer IS NOT NULL AND Writer != ''
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+        """
+        params = {"brand": bc.short_code}
+        try:
+            estimated = await client.estimate_bytes(sql, params)
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=estimated):
+                log.info("[analytics] writer_stats skipped for %s — bq_bytes cap", brand)
+                return 0
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001 — BQ offline/erroring → skip softly
+            log.info("[analytics] writer_stats query failed for %s: %s", brand, exc)
+            return 0
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+        ranked = normalize_writers(
+            [{"author": r.get("author"), "category": r.get("category"),
+              "intent": r.get("intent"), "sessions": r.get("sessions")} for r in res.rows],
+            min_articles=min_articles, top_n=top_n)
+
+        win_end = date.today()
+        win_start = win_end - timedelta(days=window_days)
+        await self.ctx.session.execute(_delete(WriterStats).where(
+            WriterStats.brand == brand, WriterStats.window_start == win_start,
+            WriterStats.window_end == win_end))
+        for w in ranked:
+            self.ctx.session.add(WriterStats(
+                brand=brand, author=w["author"], window_start=win_start, window_end=win_end,
+                article_count=w["article_count"], avg_sessions=w["avg_sessions"],
+                norm_score=w["norm_score"], is_top=w["is_top"]))
+        await self.ctx.session.flush()
+
+        await self.ctx.store.write(EntryDraft(
+            type=EntryType.METRIC, brand=brand, source_agent="analytics", source_system="bigquery",
+            payload={"kind": "top_writers", "window_days": window_days, "top_n": top_n,
+                     "writer_count": len(ranked), "top": [w for w in ranked if w["is_top"]]},
+            confidence=0.9, ttl_seconds=7 * 24 * 3600))
+        return len(ranked)
 
     # -- session trends (PRD §16.1) ------------------------------------------
 
