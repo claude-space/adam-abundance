@@ -328,13 +328,17 @@ async def _record_pipeline_cost(ctx: RunContext, pipeline: ContentPipeline) -> N
     micros = 0
     words = 0
     used_profile = False
+    style_profile_id: int | None = None
     for job in pipeline.jobs:
         if job.cost:
             micros += int(job.cost.get("llm_micros") or 0)
         meta = job.preview_meta or {}
         words += int(meta.get("word_count") or 0)
-        # Phase 9b will stamp this on generation; false for every job until then.
-        used_profile = used_profile or bool(meta.get("used_style_profile"))
+        # Stamped by the generator (§16.3) when a house style profile was folded
+        # into the draft; false for every job until a profile has been distilled.
+        if meta.get("used_style_profile"):
+            used_profile = True
+            style_profile_id = style_profile_id or meta.get("style_profile_id")
 
     llm_usd = pricing.metric_to_usd("llm_micros", micros)
     total_usd = round(llm_usd, 6)
@@ -353,7 +357,7 @@ async def _record_pipeline_cost(ctx: RunContext, pipeline: ContentPipeline) -> N
         ctx.session.add(PipelineCost(
             pipeline_run_id=run_id, brand=pipeline.brand, article_url=None,
             action_type="trend_pipeline", used_style_profile=used_profile,
-            style_profile_id=None, cost_breakdown=breakdown, total_usd=total_usd,
+            style_profile_id=style_profile_id, cost_breakdown=breakdown, total_usd=total_usd,
             human_equiv_usd=human_equiv, savings_usd=savings,
         ))
     else:
@@ -362,6 +366,7 @@ async def _record_pipeline_cost(ctx: RunContext, pipeline: ContentPipeline) -> N
         existing.human_equiv_usd = human_equiv
         existing.savings_usd = savings
         existing.used_style_profile = used_profile
+        existing.style_profile_id = style_profile_id
         existing.completed_at = datetime.now(timezone.utc)
     await ctx.session.flush()
 

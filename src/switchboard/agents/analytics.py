@@ -21,7 +21,14 @@ class AnalyticsAgent(BaseAgent):
         written += await self._rollup(brand)
         written += await self._session_trends(brand)
         written += await self._writer_stats(brand)
+        written += await self._style_profile(brand)
         return written
+
+    def _int_cred(self, key: str, default: int) -> int:
+        try:
+            return int(self.ctx.creds.resolve(key, secret=False) or default)
+        except (ValueError, TypeError):
+            return default
 
     # -- top-writer stats (PRD §16.3) ----------------------------------------
 
@@ -97,6 +104,166 @@ class AnalyticsAgent(BaseAgent):
                      "writer_count": len(ranked), "top": [w for w in ranked if w["is_top"]]},
             confidence=0.9, ttl_seconds=7 * 24 * 3600))
         return len(ranked)
+
+    # -- style profile (PRD §16.3) -------------------------------------------
+
+    async def _style_profile(self, brand: str) -> int:
+        """Distil the brand's aggregate writer style profile: scrape the top
+        writers' best recent articles, extract shared style features via the
+        LLM, and persist a new active WriterStyleProfile version.
+
+        Opt-in (``WRITER_STYLE_PROFILE_ENABLED``) because it scrapes external
+        sites and spends LLM/BigQuery budget, and rate-limited to every
+        ``WRITER_STYLE_REFRESH_DAYS``. Soft-fails to 0 on any missing dependency
+        (flag off, BigQuery down, too few exemplars scraped, LLM unavailable) so
+        it can never break the observe cycle."""
+        if brand == "portfolio":
+            return 0
+        enabled = (self.ctx.creds.resolve("WRITER_STYLE_PROFILE_ENABLED", secret=False) or "0")
+        if enabled.strip().lower() not in ("1", "true", "yes", "on"):
+            return 0
+
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import func as _func, select, update as _update
+
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from ..adapters.clients.llm import LLMClient
+        from ..db.models import WriterStats, WriterStyleProfile
+        from .. import style as style_mod
+
+        refresh_days = self._int_cred("WRITER_STYLE_REFRESH_DAYS", 14)
+        active = (await self.ctx.session.execute(
+            select(WriterStyleProfile)
+            .where(WriterStyleProfile.brand == brand, WriterStyleProfile.active.is_(True))
+            .order_by(WriterStyleProfile.version.desc()).limit(1))).scalar_one_or_none()
+        if active is not None and (datetime.now(timezone.utc) - active.created_at) < timedelta(days=refresh_days):
+            return 0  # a fresh profile already exists — nothing to refresh
+
+        top_authors = list(dict.fromkeys((await self.ctx.session.execute(
+            select(WriterStats.author)
+            .where(WriterStats.brand == brand, WriterStats.is_top.is_(True))
+            .order_by(WriterStats.norm_score.desc()))).scalars().all()))
+        if len(top_authors) < 2:
+            return 0
+
+        bc = self.ctx.settings.brand(brand)
+        try:
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except AdapterUnavailable:
+            return 0
+        window_days = self._int_cred("WRITER_STATS_WINDOW_DAYS", 90)
+        sql = f"""
+            SELECT Writer AS author, ArticleTitle AS title, URL AS url,
+                   COALESCE(ActSessSentinel, 0) AS sessions
+            FROM {_CONSUM_TABLE}
+            WHERE Brand=@brand AND Writer IN UNNEST(@authors)
+              AND URL IS NOT NULL AND URL != ''
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+            ORDER BY sessions DESC LIMIT 200
+        """
+        params = {"brand": bc.short_code, "authors": top_authors}
+        try:
+            estimated = await client.estimate_bytes(sql, params)
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=estimated):
+                log.info("[analytics] style_profile skipped for %s — bq_bytes cap", brand)
+                return 0
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[analytics] style_profile query failed for %s: %s", brand, exc)
+            return 0
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+        exemplars = style_mod.select_exemplars(
+            top_authors,
+            [{"author": r.get("author"), "title": r.get("title"), "url": r.get("url"),
+              "sessions": r.get("sessions")} for r in res.rows],
+            per_author=self._int_cred("WRITER_STYLE_PER_AUTHOR", 2),
+            cap=self._int_cred("WRITER_STYLE_EXEMPLARS", 8))
+        if len(exemplars) < 3:
+            return 0
+
+        scraped = await self._scrape_exemplars(exemplars)
+        if len(scraped) < 3:
+            log.info("[analytics] style_profile: only %d/%d exemplars scraped for %s — skip",
+                     len(scraped), len(exemplars), brand)
+            return 0
+
+        max_chars = self._int_cred("WRITER_STYLE_MAX_CHARS", 2500)
+        try:
+            result = await LLMClient(self.ctx).complete(
+                system=style_mod.STYLE_SYSTEM,
+                prompt=style_mod.build_distill_prompt(brand, scraped, max_chars=max_chars),
+                model=self.ctx.settings.models.default, max_tokens=1200, agent="analytics")
+        except AdapterUnavailable as exc:
+            log.info("[analytics] style_profile LLM unavailable for %s: %s", brand, exc)
+            return 0
+        features = style_mod.parse_style_features(result.text)
+        if not features or not any(features.values()):
+            log.info("[analytics] style_profile: empty features for %s — skip", brand)
+            return 0
+
+        next_version = int((await self.ctx.session.execute(
+            select(_func.coalesce(_func.max(WriterStyleProfile.version), 0))
+            .where(WriterStyleProfile.brand == brand))).scalar_one()) + 1
+        await self.ctx.session.execute(
+            _update(WriterStyleProfile)
+            .where(WriterStyleProfile.brand == brand, WriterStyleProfile.active.is_(True))
+            .values(active=False))
+        used_authors = list(dict.fromkeys(e["author"] for e in scraped))
+        self.ctx.session.add(WriterStyleProfile(
+            brand=brand, version=next_version, source_authors=used_authors,
+            features=features, active=True,
+            exemplar_refs={"urls": [e["url"] for e in scraped],
+                           "titles": [e["title"] for e in scraped]}))
+        await self.ctx.session.flush()
+
+        await self.ctx.store.write(EntryDraft(
+            type=EntryType.METRIC, brand=brand, source_agent="analytics", source_system="switchboard",
+            payload={"kind": "style_profile_updated", "version": next_version,
+                     "source_authors": used_authors, "exemplars": len(scraped),
+                     "features": features},
+            confidence=0.85, ttl_seconds=30 * 24 * 3600))
+        log.info("[analytics] style_profile v%d for %s from %d exemplars", next_version, brand, len(scraped))
+        return 1
+
+    async def _scrape_exemplars(self, exemplars: list[dict]) -> list[dict]:
+        """Fetch + extract article body text for each exemplar URL (trafilatura).
+        Best-effort: drops any that error, 4xx/5xx, or come back too short to
+        characterize style."""
+        try:
+            import httpx  # type: ignore
+            import trafilatura  # type: ignore
+        except ImportError:
+            return []
+        max_chars = self._int_cred("WRITER_STYLE_MAX_CHARS", 2500)
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; SwitchboardBot/1.0; +analytics)"}
+        out: list[dict] = []
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True, headers=headers) as client:
+            for ex in exemplars:
+                # The consum table stores protocol-less URLs (e.g. "www.hotcars.com/…");
+                # give httpx an absolute URL.
+                url = (ex.get("url") or "").strip()
+                if url and not url.startswith(("http://", "https://")):
+                    url = "https://" + url.lstrip("/")
+                if not url:
+                    continue
+                try:
+                    resp = await client.get(url)
+                    if resp.status_code >= 400:
+                        continue
+                    text = (trafilatura.extract(resp.text, include_comments=False,
+                                                include_tables=False) or "").strip()
+                except Exception as exc:  # noqa: BLE001
+                    log.debug("[analytics] scrape failed %s: %s", url, exc)
+                    continue
+                if len(text) < 400:   # too short to say anything about style
+                    continue
+                out.append({**ex, "url": url, "text": text[:max_chars]})
+        return out
 
     # -- session trends (PRD §16.1) ------------------------------------------
 
