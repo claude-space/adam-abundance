@@ -49,17 +49,26 @@ class BigQueryClient:
     def _query_sync(self, sql: str, params: dict[str, Any] | None, dry_run: bool) -> BQResult:
         from google.cloud import bigquery  # type: ignore
 
+        def _bq_type(v: Any) -> str:
+            if isinstance(v, bool):     # bool before int — bool is an int subclass
+                return "BOOL"
+            if isinstance(v, int):
+                return "INT64"
+            if isinstance(v, float):
+                return "FLOAT64"
+            return "STRING"
+
         client = self._get_client()
         qp = []
         for name, value in (params or {}).items():
-            bq_type = "STRING"
-            if isinstance(value, bool):
-                bq_type = "BOOL"
-            elif isinstance(value, int):
-                bq_type = "INT64"
-            elif isinstance(value, float):
-                bq_type = "FLOAT64"
-            qp.append(bigquery.ScalarQueryParameter(name, bq_type, value))
+            if isinstance(value, (list, tuple)):
+                # Array parameter (e.g. `WHERE col IN UNNEST(@names)`); element
+                # type is inferred from the first item, defaulting to STRING.
+                seq = list(value)
+                qp.append(bigquery.ArrayQueryParameter(
+                    name, _bq_type(seq[0]) if seq else "STRING", seq))
+            else:
+                qp.append(bigquery.ScalarQueryParameter(name, _bq_type(value), value))
         job_config = bigquery.QueryJobConfig(
             query_parameters=qp, dry_run=dry_run, use_query_cache=not dry_run
         )

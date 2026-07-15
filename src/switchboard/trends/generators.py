@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .. import style as style_module
 from ..adapters._http import post_json
 from ..adapters.base import AdapterUnavailable
 from ..adapters.clients.llm import LLMClient
@@ -170,22 +171,48 @@ _LLM_MAX_TOKENS = {"article": 3000, "social_post": 1200, "newsletter_blurb": 800
 
 async def _gen_llm(ctx: RunContext, job: ContentJob, brief: str) -> GenerationResult:
     llm = LLMClient(ctx)
+    brand = job.pipeline.brand if job.pipeline else "portfolio"
+    system = _LLM_SYSTEM.format(brand=brand)
+
+    # Writer-emulation style layer (§16.3): fold the brand's active style profile
+    # into the system prompt. No-op — byte-for-byte the old prompt — until a
+    # profile has been distilled, so this is safe to ship before writers connect.
+    profile = await _active_style_profile(ctx, brand)
+    guide = style_module.style_guide_text(profile.features if profile else None)
+    if guide:
+        system = f"{system}\n\n{guide}"
+
     result = await llm.complete(
-        system=_LLM_SYSTEM.format(brand=job.pipeline.brand if job.pipeline else "portfolio"),
-        prompt=brief,
-        model=ctx.settings.models.default,
-        max_tokens=_LLM_MAX_TOKENS.get(job.content_type, 2000),
-        agent="trend_pipeline",
+        system=system, prompt=brief, model=ctx.settings.models.default,
+        max_tokens=_LLM_MAX_TOKENS.get(job.content_type, 2000), agent="trend_pipeline",
     )
     text = result.text.strip()
     if not text:
         return GenerationResult(ok=False, error="LLM returned an empty draft")
-    return GenerationResult(
-        ok=True, preview_markdown=text,
-        preview_meta={"title": _first_heading(text), "word_count": len(text.split()),
-                      "generator": "switchboard-llm", "model": ctx.settings.models.default},
-        cost_micros=result.micros,
-    )
+    meta: dict[str, Any] = {"title": _first_heading(text), "word_count": len(text.split()),
+                            "generator": "switchboard-llm", "model": ctx.settings.models.default,
+                            "used_style_profile": bool(guide)}
+    if guide and profile is not None:
+        meta["style_profile_id"] = profile.id
+        meta["style_profile_version"] = profile.version
+    return GenerationResult(ok=True, preview_markdown=text, preview_meta=meta,
+                            cost_micros=result.micros)
+
+
+async def _active_style_profile(ctx: RunContext, brand: str):
+    """The brand's active WriterStyleProfile, or None. Soft-fails to None so a
+    lookup error never blocks drafting."""
+    from sqlalchemy import select
+
+    from ..db.models import WriterStyleProfile
+    try:
+        return (await ctx.session.execute(
+            select(WriterStyleProfile)
+            .where(WriterStyleProfile.brand == brand, WriterStyleProfile.active.is_(True))
+            .order_by(WriterStyleProfile.version.desc()).limit(1))).scalar_one_or_none()
+    except Exception as exc:  # noqa: BLE001
+        log.debug("[generate] style-profile lookup failed for %s: %s", brand, exc)
+        return None
 
 
 async def _gen_social_api(ctx: RunContext, pipeline: ContentPipeline,
