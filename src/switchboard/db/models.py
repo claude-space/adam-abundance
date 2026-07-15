@@ -399,3 +399,63 @@ class WriterStyleProfile(Base):
     )
 
     __table_args__ = (Index("uq_writer_style_profile_version", "brand", "version", unique=True),)
+
+
+class PricingConfig(Base):
+    """USD pricing that turns raw usage into dollars (PRD §16.4). One source for
+    BOTH the governor's caps and the read-only Expenditure view."""
+
+    __tablename__ = "pricing_config"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)        # llm_input|llm_output|ahrefs_unit|bq_tb|api_call
+    key: Mapped[str | None] = mapped_column(Text)                  # model id / vendor where relevant
+    usd_per_unit: Mapped[float] = mapped_column(Float, nullable=False)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_pricing_config_kind_key", "kind", "key"),)
+
+
+class WriterPayBaseline(Base):
+    """SENSITIVE, access-controlled (PRD §16.4 / §13.16): per-article/word human
+    pay rates, used only for the AI-vs-human cost comparison."""
+
+    __tablename__ = "writer_pay_baseline"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str | None] = mapped_column(Text)              # NULL = brand default rate
+    usd_per_article: Mapped[float | None] = mapped_column(Float)
+    usd_per_word: Mapped[float | None] = mapped_column(Float)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class PipelineCost(Base):
+    """Rolled-up USD cost of one accepted pipeline (PRD §16.4). Sums the
+    associated tool_call_log costs; carries the human-equivalent + savings when a
+    writer-emulation profile produced the article."""
+
+    __tablename__ = "pipeline_cost"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pipeline_run_id: Mapped[str] = mapped_column(Text, nullable=False)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    article_url: Mapped[str | None] = mapped_column(Text)
+    action_type: Mapped[str | None] = mapped_column(Text)
+    used_style_profile: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    style_profile_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("writer_style_profile.id", ondelete="SET NULL")
+    )
+    cost_breakdown: Mapped[dict] = mapped_column(JSONB, nullable=False)   # {llm_usd, ahrefs_usd, bq_usd, other_usd}
+    total_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    human_equiv_usd: Mapped[float | None] = mapped_column(Float)
+    savings_usd: Mapped[float | None] = mapped_column(Float)
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_pipeline_cost_brand_completed", "brand", "completed_at"),)
