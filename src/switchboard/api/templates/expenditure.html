@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}Expenditure — Switchboard{% endblock %}
+{% block body %}
+{% set SRC = {"llm_micros":"LLM","bq_bytes":"BigQuery","ahrefs_units":"Ahrefs"} %}
+{% set RANGES = [(7,"7 days"),(30,"30 days"),(90,"90 days"),(365,"1 year")] %}
+
+<style>
+  .ex-total{ font-family:var(--font-mono); font-size:40px; font-weight:800; color:var(--ink); letter-spacing:-.02em; }
+  .ex-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; }
+  .ex-src{ background:var(--surface); border:1px solid var(--line-2); border-radius:var(--radius-lg); padding:14px; }
+  .ex-src .lbl{ font-size:11px; font-weight:700; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); }
+  .ex-src .usd{ font-family:var(--font-mono); font-size:22px; font-weight:800; color:var(--ink); margin-top:6px; }
+  .ex-src .raw{ font-family:var(--font-mono); font-size:11px; color:var(--muted); margin-top:2px; }
+  .ex-chart{ display:flex; align-items:flex-end; gap:3px; height:120px; margin-top:12px; padding-top:8px; border-top:1px solid var(--line); }
+  .ex-bar-wrap{ flex:1; display:flex; flex-direction:column; align-items:center; justify-content:flex-end; height:100%; gap:4px; }
+  .ex-bar{ width:100%; max-width:22px; border-radius:3px 3px 0 0; background:color-mix(in srgb,var(--accent) 55%,transparent); min-height:1px; }
+  .ex-day{ font-family:var(--font-mono); font-size:8px; color:var(--muted); transform:rotate(-45deg); white-space:nowrap; }
+  .ex-agent{ display:flex; align-items:center; gap:10px; padding:9px 2px; border-bottom:1px solid var(--line); }
+  .ex-agent .bar{ flex:1; height:6px; }
+</style>
+
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Governor · Observability</span>
+  <h2 style="margin-top:12px">
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+    </span>
+    Expenditure
+  </h2>
+  <div class="ph-sub">What these processes have cost — priced from the same ledger the governor caps. One source of truth.</div>
+</div>
+
+<div class="panel rise-2">
+  <form method="get" action="/expenditure" class="toolbar">
+    <label>Range<br>
+      <select name="days" onchange="this.form.submit()">
+        {% for d, lbl in RANGES %}<option value="{{ d }}" {{ 'selected' if d==days }}>{{ lbl }}</option>{% endfor %}
+      </select></label>
+    <noscript><button type="submit">Apply</button></noscript>
+    <div style="margin-left:auto;text-align:right">
+      <div class="kpi-label">Total AI spend · last {{ days }}d</div>
+      <div class="ex-total">${{ '%.2f'|format(total_usd) }}</div>
+    </div>
+  </form>
+</div>
+
+<div class="ex-grid rise-3" style="margin-bottom:16px">
+  {% for s in by_source %}
+  <div class="ex-src">
+    <div class="lbl">{{ SRC.get(s.metric, s.metric) }}</div>
+    <div class="usd">${{ '%.2f'|format(s.usd) }}</div>
+    <div class="raw">{{ '{:,}'.format(s.amount) }} {{ s.metric.replace('_',' ') }}</div>
+  </div>
+  {% else %}
+  <div class="ex-src"><div class="lbl">No spend</div><div class="usd">$0.00</div>
+    <div class="raw">nothing metered in this range yet</div></div>
+  {% endfor %}
+</div>
+
+<div class="panel rise-3">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>
+    Daily spend <span class="hint muted">USD/day, last {{ days }}d</span>
+  </h3>
+  {% if series %}
+  {% set maxd = (series | map(attribute='usd') | max) or 0.000001 %}
+  <div class="ex-chart">
+    {% for pt in series %}
+    <div class="ex-bar-wrap" title="{{ pt.date }}: ${{ '%.4f'|format(pt.usd) }}">
+      <div class="ex-bar" style="height:{{ [(pt.usd / maxd * 100), 1]|max }}%"></div>
+      <div class="ex-day">{{ pt.date[5:] }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty"><div class="e-icon">◔</div>No metered spend in this range.</div>
+  {% endif %}
+</div>
+
+<div class="grid rise-4" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:16px">
+  <div class="panel" style="margin:0">
+    <h3>By agent <span class="hint muted">USD, last {{ days }}d</span></h3>
+    {% set maxa = (by_agent | map(attribute='usd') | max) or 0.000001 %}
+    {% for a in by_agent %}
+    <div class="ex-agent">
+      <span class="chip"><span class="adot" style="background:{{ agent_color(a.agent) }}"></span>{{ a.agent }}</span>
+      <span class="bar"><span style="width:{{ (a.usd / maxa * 100)|round(0) }}%;background:{{ agent_color(a.agent) }}"></span></span>
+      <b class="mono" style="font-variant-numeric:tabular-nums">${{ '%.2f'|format(a.usd) }}</b>
+    </div>
+    {% else %}<div class="muted" style="font-size:12.5px">No per-agent spend yet.</div>{% endfor %}
+  </div>
+
+  <div class="panel" style="margin:0{% if may_see_pay %};border-left:3px solid var(--accent){% endif %}">
+    <h3>AI vs. human <span class="hint muted">accepted pipelines</span></h3>
+    {% if not may_see_pay %}
+      <div class="empty"><div class="e-icon">🔒</div>Access-controlled — the AI-vs-human cost comparison is visible to portfolio/global admins only.</div>
+    {% elif pipeline_cost.count %}
+      <div class="mini-kpis">
+        <div><div class="v">${{ '%.0f'|format(pipeline_cost.ai_usd) }}</div><div class="l">AI cost</div></div>
+        <div><div class="v">${{ '%.0f'|format(pipeline_cost.human_usd) }}</div><div class="l">Human equiv.</div></div>
+        <div><div class="v" style="color:{{ 'var(--good)' if pipeline_cost.savings_usd>=0 else 'var(--bad)' }}">${{ '%.0f'|format(pipeline_cost.savings_usd) }}</div><div class="l">Delta</div></div>
+      </div>
+      <p class="muted" style="font-size:11.5px;margin-top:10px">A cost lens, not a verdict — it excludes editorial review time, quality/liability, and topic-assignment effects.</p>
+    {% else %}
+      <div class="empty"><div class="e-icon">◇</div>No costed pipelines in range yet.<br>
+        <span style="font-size:12px">Populates once accepted pipelines complete and <code>writer_pay_baseline</code> rates are set.</span></div>
+    {% endif %}
+  </div>
+</div>
+
+<p class="muted rise-4" style="font-size:11.5px;margin-top:14px">
+  Pricing: LLM from the per-model cost model; BigQuery ${{ '%g'|format(rates.bq_tb) }}/TiB; Ahrefs ${{ '%g'|format(rates.ahrefs_unit) }}/unit
+  <span style="color:var(--warn)">(placeholder — confirm §13.17)</span>.
+</p>
+{% endblock %}
