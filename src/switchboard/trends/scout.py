@@ -76,6 +76,7 @@ class TrendScout:
         clusters = detector.cluster_signals(items)
         our_titles = await self._our_titles()
         hc_titles = await self._hc_viral_titles()
+        dr_titles = await self._daily_reporting_titles()
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
@@ -90,11 +91,19 @@ class TrendScout:
             if len(cluster.sources) < cfg.min_sources:
                 continue
             covered = detector.covered_by_titles(cluster, our_titles) if our_titles else None
-            corroborated = bool(hc_titles) and detector.corroborated_by_titles(cluster, hc_titles)
-            if corroborated:
+            # Cross-source corroboration (§13.19): which independent monitoring
+            # systems also landed on this topic. Our own sourcing is the baseline;
+            # HC-Viral + daily-reporting each add confidence.
+            monitors: list[str] = []
+            if hc_titles and detector.corroborated_by_titles(cluster, hc_titles):
+                monitors.append("hc_viral_hits")
+            if dr_titles and detector.corroborated_by_titles(cluster, dr_titles):
+                monitors.append("daily_reporting")
+            if monitors:
                 summary["corroborated"] += 1
             score, breakdown = detector.score_cluster(
-                cluster, watchlist=cfg.watchlist, covered=covered, corroborated=corroborated)
+                cluster, watchlist=cfg.watchlist, covered=covered,
+                corroborating_monitors=monitors)
             trend, created = await self.trends.upsert(
                 brand=brand, cluster_key=cluster.cluster_key(), headline=cluster.headline,
                 score=score, score_breakdown=breakdown,
@@ -102,7 +111,7 @@ class TrendScout:
                 source_count=len(cluster.sources), signal_count=len(cluster.items),
                 covered_by_us=covered,
                 entities={"oems": list(cluster.oem_anchor),
-                          "corroborated_by": ["hc_viral"] if corroborated else []},
+                          "corroborated_by": monitors},
                 evidence=[_evidence(i) for i in cluster.items],
                 ttl_hours=cfg.ttl_hours, dedup_days=cfg.dedup_days,
             )
@@ -201,6 +210,27 @@ class TrendScout:
                 except Exception as exc:  # noqa: BLE001 — soft-fail
                     log.info("[scout] hc-viral corroboration fetch failed (%s): %s", brand, exc)
             titles.extend(r.get("title", "") for r in rows if r.get("title"))
+        return [t for t in titles if t]
+
+    async def _daily_reporting_titles(self) -> list[str]:
+        """Trend/topic titles Anthony's daily-reporting agent has surfaced — the
+        third corroboration source (§13.19). Read from shared memory, where a
+        feeder exports that agent's findings (kind ``daily_report_trends``). Soft-
+        empty until it's connected, so corroboration degrades to us + HC-Viral."""
+        try:
+            entries = await self.ctx.store.query(
+                brand=PORTFOLIO, types=[EntryType.CONTEXT],
+                payload_contains={"kind": "daily_report_trends"},
+                fresh_within_seconds=48 * 3600, limit=50)
+        except Exception as exc:  # noqa: BLE001 — corroboration is a bonus, never a dependency
+            log.info("[scout] daily-reporting corroboration fetch failed: %s", exc)
+            return []
+        titles: list[str] = []
+        for e in entries:
+            for it in (e.payload or {}).get("items", []):
+                t = it.get("title") or it.get("topic") or it.get("headline")
+                if t:
+                    titles.append(t)
         return [t for t in titles if t]
 
     async def _update_lifecycle(self, brand: str) -> int:

@@ -182,9 +182,20 @@ def corroborated_by_titles(cluster: Cluster, titles: Iterable[str]) -> bool:
 
 # -- scoring -------------------------------------------------------------------
 
-# Bonus when an independent monitor (HC Viral Hits) landed on the same topic —
-# two systems agreeing is a strong signal, so it counts like a watchlist hit.
-_CROSS_MONITOR_BONUS = 15.0
+# Corroboration: how strongly *independent monitoring systems* agree this is a
+# real trend (§13.19). Our own scout sourcing is the baseline (the cluster exists
+# because we found it); each ADDITIONAL system that independently landed on the
+# same topic — HC Viral Hits, Anthony's daily-reporting agent — is a strong
+# confidence signal, so each adds points (two agreeing ≈ a watchlist-grade hit).
+_CORROBORATION_BONUS = 15.0     # per independent monitor beyond our own sourcing
+_CORROBORATION_MAX = 30.0
+
+# Novelty: reward a trend that ISN'T widely published yet — few competitor outlets
+# have run it, so there's room to get ahead. Decays as more outlets pile on
+# (saturation). The scout's ``min_sources`` gate filters single-outlet noise
+# BEFORE scoring, so this rewards *scarce*, not *unverified*.
+_NOVELTY_MAX = 20.0
+_NOVELTY_STEP = 4.0             # points shed per extra competitor outlet
 
 
 def score_cluster(
@@ -192,15 +203,32 @@ def score_cluster(
     *,
     watchlist: Iterable[str] = (),
     covered: bool | None = None,
-    corroborated: bool = False,
+    corroborating_monitors: Iterable[str] = (),
+    corroborated: bool = False,   # back-compat: True ≡ HC Viral Hits corroborated
     now: datetime | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Score 0–100 with an explainable breakdown (surfaced in the console)."""
+    """Score 0–100 with an explainable breakdown (surfaced in the console).
+
+    Two headline signals (§13.19): *corroboration* — how many independent
+    monitoring systems (our scout + HC Viral Hits + daily-reporting) landed on
+    the same topic — and *novelty* — how little it has been published elsewhere
+    yet. A trend several systems agree on but few outlets have covered scores
+    highest: real, and still ahead of the pack.
+    """
     now = now or datetime.now(timezone.utc)
     breakdown: dict[str, float] = {}
 
-    n_sources = len(cluster.sources)
-    breakdown["outlet_breadth"] = min((n_sources - 1) * 14.0, 42.0)
+    # Corroboration across independent monitoring systems. Own sourcing is the
+    # baseline (no bonus); each extra agreeing system adds points.
+    monitors = {m for m in corroborating_monitors if m}
+    if corroborated:
+        monitors.add("hc_viral_hits")
+    if monitors:
+        breakdown["corroboration"] = min(len(monitors) * _CORROBORATION_BONUS, _CORROBORATION_MAX)
+
+    # Novelty: fewer competitor outlets covering it ⇒ more room to get ahead of it.
+    n_outlets = len(cluster.sources)
+    breakdown["novelty"] = round(max(0.0, _NOVELTY_MAX - (n_outlets - 1) * _NOVELTY_STEP), 1)
 
     times = cluster.times()
     velocity = 0.0
@@ -221,11 +249,6 @@ def score_cluster(
 
     is_breaking = bool(_BREAKING_RE.search(text)) and not _EVERGREEN_RE.search(text)
     breakdown["breaking"] = 12.0 if is_breaking else 0.0
-
-    # Cross-monitor corroboration: HC Viral Hits independently landed on the same
-    # topic. Two monitors agreeing is a strong signal → bonus points.
-    if corroborated:
-        breakdown["cross_monitor"] = _CROSS_MONITOR_BONUS
 
     if times and (now - times[-1]) > timedelta(hours=48):
         breakdown["stale_penalty"] = -10.0
