@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Writer Emulation — Switchboard{% endblock %}
+{% block body %}
+{% set FEAT = [("voice","Voice"),("tone","Tone"),("structure","Structure"),("sentence_rhythm","Rhythm"),("headline_style","Headlines"),("formatting","Formatting"),("vocabulary","Vocabulary")] %}
+{% set sel_label = (brands|selectattr('key','equalto',sel_brand)|map(attribute='label')|first) or sel_brand %}
+
+<style>
+  .we-brandbar{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .we-pill{ font-size:12px; font-weight:600; padding:5px 13px; border-radius:999px; border:1px solid var(--line-2);
+            color:var(--ink-2); text-decoration:none; transition:all .12s; }
+  .we-pill:hover{ border-color:var(--accent); }
+  .we-pill.on{ background:var(--accent); border-color:var(--accent); color:#0d0d0d; font-weight:700; }
+  .we-chips{ margin-left:auto; display:flex; gap:10px; }
+  .we-chip{ border:1px solid var(--line-2); background:rgba(0,0,0,.28); border-radius:12px; padding:6px 14px; text-align:right; }
+  .we-chip .v{ font-family:var(--font-mono); font-weight:800; font-size:18px; line-height:1.1; }
+
+  .we-lead{ display:grid; grid-template-columns:22px 1.5fr .55fr .8fr 1.1fr; gap:14px; align-items:center; }
+  .we-lead.head{ padding:6px 4px 10px; font-size:10.5px; text-transform:uppercase; letter-spacing:.1em; color:var(--muted); border-bottom:1px solid var(--line); }
+  .we-row{ padding:11px 4px; font-size:13px; border-bottom:1px solid var(--line); }
+  .we-row:last-child{ border-bottom:none; }
+  .we-star{ color:var(--accent); }
+  .we-bar{ flex:1; height:6px; border-radius:999px; background:var(--surface-3); overflow:hidden; }
+  .we-bar > span{ display:block; height:100%; border-radius:999px; background:var(--ink-2); }
+  .we-bar > span.top{ background:var(--accent); }
+
+  .we-sect{ font-size:12px; font-weight:700; letter-spacing:.04em; color:var(--ink); margin:24px 0 12px;
+            display:flex; align-items:baseline; gap:10px; }
+  .we-sect .hint{ font-weight:400; }
+
+  .we-grid{ display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:16px; }
+  .we-card{ background:var(--surface-2); border:1px solid var(--line); border-radius:var(--radius-lg); overflow:hidden; }
+  .we-card.active{ border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); box-shadow:var(--shadow-gold);
+                   background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,var(--surface-2)),var(--surface-2) 55%); }
+  .we-vbadge{ width:44px; height:44px; border-radius:12px; display:grid; place-items:center; font-weight:800;
+              font-size:15px; letter-spacing:-.02em; background:var(--surface-3); color:var(--ink); border:1px solid var(--line-2); }
+  .we-card.active .we-vbadge{ background:var(--accent); color:#0d0d0d; border:none; }
+  .we-auth{ font-size:11px; font-weight:500; padding:2px 8px; border-radius:6px; background:var(--surface-3); color:var(--ink-2); border:1px solid var(--line); }
+  .we-feat{ display:grid; grid-template-columns:88px 1fr; gap:14px; padding:9px 0; font-size:12.5px; border-bottom:1px solid var(--line); }
+  .we-feat:last-child{ border-bottom:none; }
+  .we-feat .k{ font-size:10px; text-transform:uppercase; letter-spacing:.08em; font-weight:700; color:var(--muted); }
+  .we-active{ font-family:var(--font-mono); font-size:11px; font-weight:700; padding:3px 10px; border-radius:999px;
+              color:#0d0d0d; background:var(--accent); }
+  .we-btn{ font-size:11px; font-weight:600; padding:4px 12px; border-radius:999px; cursor:pointer;
+           color:var(--accent); background:transparent; border:1px solid color-mix(in srgb,var(--accent) 45%,transparent); }
+  .we-btn:hover{ background:color-mix(in srgb,var(--accent) 12%,transparent); }
+</style>
+
+<div class="phero rise" style="--ph:#c9a84c">
+  <span class="pill-gold">Production · §16.3</span>
+  <h2 style="margin-top:12px">
+    <span class="ph-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+    </span>
+    Writer emulation
+  </h2>
+  <div class="ph-sub">Per-brand style profiles distilled from cohort-normalized top-writer performance. A style layer — never a byline, never a bypass of human review.</div>
+</div>
+
+<div class="panel rise-2">
+  <div class="we-brandbar">
+    <span class="side-label" style="margin:0 2px 0 0">Brand</span>
+    {% for b in brands %}
+      <a class="we-pill {{ 'on' if b.key==sel_brand }}" href="/writer-emulation?brand={{ b.key }}">{{ b.label }}</a>
+    {% endfor %}
+    <span class="we-chips">
+      <span class="we-chip"><div class="kpi-label">Top writers</div><div class="v" style="color:var(--accent)">{{ top_count }}</div></span>
+      <span class="we-chip"><div class="kpi-label">Profiles</div><div class="v" style="color:var(--ink)">{{ profiles|length }}</div></span>
+    </span>
+  </div>
+</div>
+
+<div class="panel rise-3">
+  <h3>
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7.4-6.3-4.6L5.7 21.4 8 14 2 9.4h7.6z"/></svg>
+    Writer leaderboard · {{ sel_label }}
+    <span class="hint muted">normalized by category · intent · recency window{% if window %} · week of {{ window.start }}{% endif %}</span>
+  </h3>
+  {% if writers %}
+  <div class="we-lead head">
+    <span></span><span>Author</span><span style="text-align:right">Articles</span>
+    <span style="text-align:right">Avg sessions</span><span>Norm index</span>
+  </div>
+  {% for w in writers %}
+  <div class="we-lead we-row">
+    <span>{% if w.is_top %}<svg class="we-star" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l2.4 7.4H22l-6 4.6 2.3 7.4-6.3-4.6L5.7 21.4 8 14 2 9.4h7.6z"/></svg>{% endif %}</span>
+    <span style="font-weight:500">{{ w.author }}</span>
+    <span class="mono" style="text-align:right;color:var(--ink-2)">{{ w.article_count }}</span>
+    <span class="mono" style="text-align:right;color:var(--ink-2)">{{ '{:,.0f}'.format(w.avg_sessions) }}</span>
+    <span style="display:flex;align-items:center;gap:10px">
+      <span class="we-bar"><span class="{{ 'top' if w.is_top }}" style="width:{{ [((w.norm_score / max_norm * 100) if max_norm else 0), 4]|max }}%"></span></span>
+      <b class="mono" style="width:34px;text-align:right;color:{{ 'var(--accent)' if w.is_top else 'var(--muted)' }}">{{ '%.2f'|format(w.norm_score) }}</b>
+    </span>
+  </div>
+  {% endfor %}
+  {% else %}
+  <div class="empty"><div class="e-icon">◔</div>No writer stats for {{ sel_label }} yet.<br>
+    <span style="font-size:12.5px">Analytics computes these from the BigQuery consum table on its observe run.</span></div>
+  {% endif %}
+</div>
+
+<div class="we-sect rise-3">Style profiles · {{ sel_label }}
+  <span class="hint muted">one active per brand · versioned · style layer only</span></div>
+
+{% if profiles %}
+<div class="we-grid rise-4">
+  {% for p in profiles %}
+  <div class="we-card {{ 'active' if p.active }}">
+    <div style="display:flex;align-items:center;gap:12px;padding:18px 18px 14px">
+      <div class="we-vbadge">v{{ p.version }}</div>
+      <div style="min-width:0">
+        <div style="font-size:15px;font-weight:700;line-height:1.2">Style profile</div>
+        <div class="mono muted" style="font-size:11px;margin-top:2px">{{ p.created_at }} · {{ p.exemplar_count }} exemplar{{ '' if p.exemplar_count==1 else 's' }}</div>
+      </div>
+      <span style="margin-left:auto">
+        {% if p.active %}<span class="we-active">● active</span>
+        {% elif may_edit %}
+        <form method="post" action="/writer-emulation/activate" style="margin:0">
+          <input type="hidden" name="profile_id" value="{{ p.id }}">
+          <input type="hidden" name="brand" value="{{ sel_brand }}">
+          <button type="submit" class="we-btn">Set active</button>
+        </form>
+        {% else %}<span class="muted" style="font-size:11px">inactive</span>{% endif %}
+      </span>
+    </div>
+
+    {% if p.source_authors %}
+    <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;padding:0 18px 14px">
+      <span class="side-label" style="margin:0 2px 0 0">Distilled</span>
+      {% for a in p.source_authors %}<span class="we-auth">{{ a }}</span>{% endfor %}
+    </div>
+    {% endif %}
+
+    <div style="padding:2px 18px;border-top:1px solid var(--line)">
+      {% for key, label in FEAT %}{% if p.features.get(key) %}
+      <div class="we-feat"><span class="k">{{ label }}</span><span style="color:var(--ink)">{{ p.features[key] }}</span></div>
+      {% endif %}{% endfor %}
+      {% if p.features.get('dos') %}<div class="we-feat"><span class="k">Do</span><span style="color:var(--ink)">{{ p.features['dos']|join('; ') }}</span></div>{% endif %}
+      {% if p.features.get('donts') %}<div class="we-feat"><span class="k">Don't</span><span style="color:var(--ink)">{{ p.features['donts']|join('; ') }}</span></div>{% endif %}
+    </div>
+
+    {% if p.exemplars %}
+    <details style="padding:11px 18px;border-top:1px solid var(--line);background:rgba(0,0,0,.15)">
+      <summary style="cursor:pointer;font-size:11px;font-weight:600;color:var(--accent)">{{ p.exemplar_count }} exemplar article{{ '' if p.exemplar_count==1 else 's' }}</summary>
+      <ul style="margin:9px 0 0;padding-left:16px;font-size:11.5px;line-height:1.7">
+        {% for ex in p.exemplars %}<li><a href="{{ ex.url }}" target="_blank" rel="noopener" style="color:var(--ink-2)">{{ ex.title or ex.url }}</a></li>{% endfor %}
+      </ul>
+    </details>
+    {% endif %}
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+<div class="panel">
+  <div class="empty"><div class="e-icon">◇</div>No style profile distilled for {{ sel_label }} yet.<br>
+    <span style="font-size:12.5px">Set <code>WRITER_STYLE_PROFILE_ENABLED=1</code> and run the analytics observe — it scrapes the top writers' best articles and distils a profile.</span></div>
+</div>
+{% endif %}
+
+<div class="panel rise-4" style="border-left:3px solid var(--warn);display:flex;gap:12px;align-items:flex-start;margin-top:18px">
+  <svg width="17" height="17" style="margin-top:1px;flex-shrink:0;color:var(--warn)" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5-3.5 8.5-9 10-5.5-1.5-9-5-9-10V6z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  <div style="font-size:12.5px;line-height:1.65;color:var(--ink-2)">
+    <b style="color:var(--ink)">Guardrails.</b> Fact-check, outline, and content-depth QA all still apply. AI drafts are <b>not</b> bylined as the human writer whose style was learned. Named-individual profiles require explicit consent and legal sign-off; brand-level aggregate profiles are the default.
+  </div>
+</div>
+{% endblock %}
