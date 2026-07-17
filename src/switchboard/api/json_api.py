@@ -531,6 +531,73 @@ async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
     return detail
 
 
+# --- Distribution (§6.6 outbound artifacts) -----------------------------------
+# The real distribution surface: assembled outbound artifacts staged for human
+# review (daily digest / newsletter / social) + trend drafts. Draft + human-send
+# only — nothing distributes autonomously. Same source as the HTML /distribution
+# page (memory REPORT + DISTRIBUTION_DRAFT entries).
+
+_DISTRIBUTION_KINDS = {
+    "daily_digest_inputs": ("Daily digest", "digest"),
+    "daily_digest": ("Daily digest", "digest"),
+    "newsletter_draft": ("CarBuzz newsletter", "newsletter"),
+    "social_draft": ("Social posts", "social"),
+}
+
+
+@router.get("/distribution")
+async def distribution(request: Request) -> dict[str, Any]:
+    """§6.6 outbound artifacts staged for human review — digest/newsletter/social
+    + trend drafts, with per-channel counts. Nothing sends autonomously."""
+    require_user(request)
+    from ..db.enums import EntryType
+    async with RunContext.open() as ctx:
+        rows = await ctx.store.query(types=[EntryType.REPORT, EntryType.DISTRIBUTION_DRAFT],
+                                     status=None, limit=100)
+        items = []
+        for r in rows:
+            p = r.payload or {}
+            kind = p.get("kind", "")
+            label, channel = _DISTRIBUTION_KINDS.get(kind, (kind, "other"))
+            ref = p.get("artifact_ref") if isinstance(p.get("artifact_ref"), dict) else None
+            url = None
+            if ref and ref.get("backend") == "local" and ref.get("key"):
+                url = f"/api/artifact-file/{ref['key']}"
+            elif ref:
+                url = ref.get("uri")
+            items.append({
+                "id": r.id, "brand": r.brand, "label": label, "channel": channel,
+                "type": r.type.value,
+                "status": p.get("status") or ("ready" if p.get("ready") else "inputs"),
+                "artifact_url": url,
+                "bytes": ref.get("bytes") if ref else None,
+                "created_at": routes._fmt_dt(r.created_at),
+            })
+    channels = {
+        "digest": sum(1 for i in items if i["channel"] == "digest"),
+        "newsletter": sum(1 for i in items if i["channel"] == "newsletter"),
+        "social": sum(1 for i in items if i["channel"] == "social"),
+    }
+    assembled = sum(1 for i in items if i["status"] in ("assembled", "ready"))
+    return {"items": items, "channels": channels, "assembled": assembled}
+
+
+@router.get("/artifact-file/{key:path}")
+async def artifact_file(request: Request, key: str):
+    """Serve a locally-stored artifact (read-only, path-traversal-guarded).
+    Mirrors the HTML /artifacts/{key} route but under /api so it never collides
+    with the SPA's client-side /artifacts/:id review route."""
+    require_user(request)
+    from pathlib import Path
+
+    from fastapi.responses import FileResponse, HTMLResponse
+    root = Path(get_settings().artifacts.local_dir).resolve()
+    target = (root / key).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
+        return HTMLResponse("<h3>Artifact not found</h3>", status_code=404)
+    return FileResponse(target)
+
+
 async def _json_body(request: Request) -> dict[str, Any]:
     """Tolerant JSON-body read — the SPA may POST an empty body for no-arg actions."""
     try:
