@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ..config import get_settings
 from ..context import RunContext
@@ -38,6 +38,35 @@ async def writers(request: Request, brand: str | None = None) -> dict[str, Any]:
         data = await routes.gather_writer_emulation(ctx, brand)
     data["may_edit"] = u.get("role") in ("global_admin", "portfolio_admin")
     return data
+
+
+@router.post("/writers/activate")
+async def writers_activate(request: Request) -> dict[str, Any]:
+    """Set one style-profile version active for its brand (portfolio/global admin
+    only) — the JSON sibling of the HTML form action, for the SPA."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    try:
+        pid = int((await request.json()).get("profile_id"))
+    except (TypeError, ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="profile_id required")
+    from sqlalchemy import select, update as _update
+
+    from ..db.models import WriterStyleProfile
+    async with RunContext.open() as ctx:
+        prof = (await ctx.session.execute(
+            select(WriterStyleProfile).where(WriterStyleProfile.id == pid))).scalar_one_or_none()
+        if prof is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        await ctx.session.execute(
+            _update(WriterStyleProfile)
+            .where(WriterStyleProfile.brand == prof.brand, WriterStyleProfile.active.is_(True))
+            .values(active=False))
+        prof.active = True
+        await ctx.session.flush()
+        brand, version = prof.brand, prof.version
+    return {"ok": True, "brand": brand, "active_version": version}
 
 
 @router.get("/dashboard")
