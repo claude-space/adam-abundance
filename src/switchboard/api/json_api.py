@@ -91,3 +91,42 @@ async def notifications(request: Request, limit: int = 60) -> dict[str, Any]:
     require_user(request)
     async with RunContext.open() as ctx:
         return {"items": await routes._notification_items(ctx, min(max(limit, 1), 200))}
+
+
+@router.get("/trends")
+async def trends(request: Request, brand: str | None = None) -> dict[str, Any]:
+    """Trend Radar: open trends ranked by score, recently-closed, the pending
+    trigger requests, and per-brand coverage — with per-row approvability."""
+    require_user(request)
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        repo = routes.TrendRepo(ctx.session)
+        open_trends = [routes._trend_dict(t) for t in await repo.list(
+            brand=brand or None,
+            statuses=["detected", "dossier_building", "proposed", "approved"], limit=60)]
+        recent_closed = [routes._trend_dict(t) for t in await repo.list(
+            brand=brand or None,
+            statuses=["dismissed", "declined", "expired", "completed"], limit=15)]
+        pipelines = [routes._pipeline_dict(p, with_jobs=False)
+                     for p in await routes.PipelineRepo(ctx.session).list(brand=brand or None, limit=40)]
+        coverage = await routes._brand_coverage(ctx, list(settings.brand_keys))
+    for row in (*open_trends, *recent_closed, *pipelines):
+        row["may_approve"] = routes._can_approve(request, row.get("brand", ""))
+    return {"open_trends": open_trends, "recent_closed": recent_closed,
+            "pipelines": pipelines, "coverage": coverage, "brands": list(settings.brand_keys)}
+
+
+@router.get("/pipelines")
+async def pipelines(request: Request, brand: str | None = None,
+                    status: str | None = None) -> dict[str, Any]:
+    """Content pipelines (trigger requests → jobs), with status counts."""
+    require_user(request)
+    async with RunContext.open() as ctx:
+        rows = await routes.PipelineRepo(ctx.session).list(
+            brand=brand or None, statuses=[status] if status else None, limit=80)
+        pipelines = [routes._pipeline_dict(p, with_jobs=False) for p in rows]
+    counts: dict[str, int] = {}
+    for p in pipelines:
+        counts[p["status"]] = counts.get(p["status"], 0) + 1
+        p["may_approve"] = routes._can_approve(request, p.get("brand", ""))
+    return {"pipelines": pipelines, "counts": counts}
