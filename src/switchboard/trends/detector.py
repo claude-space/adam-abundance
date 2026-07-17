@@ -181,21 +181,49 @@ def corroborated_by_titles(cluster: Cluster, titles: Iterable[str]) -> bool:
 
 
 # -- scoring -------------------------------------------------------------------
+#
+# score = clamp(0,100)[
+#     corroboration          F1: independent monitors that agree      (+, ≤ 30)
+#   + novelty                F2a: competitors haven't covered it yet  (+, ≤ 18)
+#   + saturation_penalty     F2b: covered AND the topic is fading     (−, ≥ −18)
+#   + theme_fatigue          F3:  an adjacent, older trend is fading  (−, ≥ −15)
+#   + velocity + breaking + watchlist + coverage_gap + stale_penalty  (base signals)
+# ]
+#
+# F1 — corroboration: our own scout is the baseline (the cluster exists because we
+#   found it); each ADDITIONAL system that independently landed on the topic
+#   (HC Viral Hits, Anthony's daily-reporting) adds points. Two agreeing ≈ a
+#   watchlist-grade hit.
+# F2 — competitor coverage × performance. With saturation
+#   cov = clamp((outlets−1)/SAT, 0, 1) and same-topic momentum q ∈ [−1,+1]:
+#     novelty            = NOVELTY_MAX · (1 − cov)          → first-mover reward
+#     saturation_penalty = SAT_PENALTY · cov · min(0, q)    → covered AND fading
+#   ⇒ uncovered → +novelty; covered & doing well (q ≥ 0) → ~neutral (no penalty);
+#     covered & doing poorly (q < 0) → penalty. Exactly the requested asymmetry.
+# F3 — theme fatigue: if an ADJACENT, older trend is declining, the theme is
+#   tiring and new entrants inherit the fade: theme_fatigue = −FATIGUE_MAX · r,
+#   with r = similarity · decline of that neighbour.
+#
+# q (same-topic momentum) and r (adjacent fatigue) come from the caller — the
+# scout has the lifecycle/activity history — so the scorer stays pure.
 
-# Corroboration: how strongly *independent monitoring systems* agree this is a
-# real trend (§13.19). Our own scout sourcing is the baseline (the cluster exists
-# because we found it); each ADDITIONAL system that independently landed on the
-# same topic — HC Viral Hits, Anthony's daily-reporting agent — is a strong
-# confidence signal, so each adds points (two agreeing ≈ a watchlist-grade hit).
-_CORROBORATION_BONUS = 15.0     # per independent monitor beyond our own sourcing
+_CORROBORATION_BONUS = 15.0     # F1: per independent monitor beyond our own sourcing
 _CORROBORATION_MAX = 30.0
+_SAT_OUTLETS = 5.0              # competitor outlets at which a topic reads as "saturated"
+_NOVELTY_MAX = 18.0            # F2a: first-mover reward when competitors haven't covered it
+_SATURATION_PENALTY = 18.0     # F2b: max penalty when a saturated topic is ALSO fading
+_FATIGUE_MAX = 15.0            # F3: max penalty when an adjacent theme is aging + declining
 
-# Novelty: reward a trend that ISN'T widely published yet — few competitor outlets
-# have run it, so there's room to get ahead. Decays as more outlets pile on
-# (saturation). The scout's ``min_sources`` gate filters single-outlet noise
-# BEFORE scoring, so this rewards *scarce*, not *unverified*.
-_NOVELTY_MAX = 20.0
-_NOVELTY_STEP = 4.0             # points shed per extra competitor outlet
+
+def topic_similarity(cluster: Cluster, other_tokens: Iterable[str],
+                     other_oems: Iterable[str] = ()) -> float:
+    """0–1 topical similarity between a cluster and another topic (a tracked
+    trend): significant-token Jaccard with a shared-OEM boost. Used to find a
+    cluster's neighbourhood — the same topic recurring, or an adjacent theme."""
+    sim = _jaccard(cluster.token_set, {t for t in other_tokens})
+    if other_oems and set(cluster.oem_anchor) & {o.lower() for o in other_oems}:
+        sim = max(sim, 0.35) + 0.15
+    return min(sim, 1.0)
 
 
 def score_cluster(
@@ -204,31 +232,34 @@ def score_cluster(
     watchlist: Iterable[str] = (),
     covered: bool | None = None,
     corroborating_monitors: Iterable[str] = (),
-    corroborated: bool = False,   # back-compat: True ≡ HC Viral Hits corroborated
+    corroborated: bool = False,        # back-compat: True ≡ HC Viral Hits corroborated
+    topic_momentum: float | None = None,   # F2: same-topic performance −1..+1 (None = unknown)
+    theme_fatigue: float | None = None,    # F3: adjacent-theme decay 0..1 (None/0 = none)
     now: datetime | None = None,
 ) -> tuple[float, dict[str, float]]:
-    """Score 0–100 with an explainable breakdown (surfaced in the console).
-
-    Two headline signals (§13.19): *corroboration* — how many independent
-    monitoring systems (our scout + HC Viral Hits + daily-reporting) landed on
-    the same topic — and *novelty* — how little it has been published elsewhere
-    yet. A trend several systems agree on but few outlets have covered scores
-    highest: real, and still ahead of the pack.
-    """
+    """Score 0–100 with an explainable breakdown (surfaced in the console). See
+    the module-level equation above for the three headline factors."""
     now = now or datetime.now(timezone.utc)
     breakdown: dict[str, float] = {}
 
-    # Corroboration across independent monitoring systems. Own sourcing is the
-    # baseline (no bonus); each extra agreeing system adds points.
+    # F1 — corroboration across independent monitoring systems.
     monitors = {m for m in corroborating_monitors if m}
     if corroborated:
         monitors.add("hc_viral_hits")
     if monitors:
         breakdown["corroboration"] = min(len(monitors) * _CORROBORATION_BONUS, _CORROBORATION_MAX)
 
-    # Novelty: fewer competitor outlets covering it ⇒ more room to get ahead of it.
-    n_outlets = len(cluster.sources)
-    breakdown["novelty"] = round(max(0.0, _NOVELTY_MAX - (n_outlets - 1) * _NOVELTY_STEP), 1)
+    # F2 — competitor coverage × performance.
+    cov = min(max((len(cluster.sources) - 1) / _SAT_OUTLETS, 0.0), 1.0)
+    breakdown["novelty"] = round(_NOVELTY_MAX * (1.0 - cov), 1)          # first-mover reward
+    q = 0.0 if topic_momentum is None else max(-1.0, min(1.0, topic_momentum))
+    if cov > 0 and q < 0:                                                 # covered AND fading
+        breakdown["saturation_penalty"] = round(_SATURATION_PENALTY * cov * q, 1)  # q<0 ⇒ negative
+
+    # F3 — adjacent-theme fatigue (a related, older trend is declining).
+    r = 0.0 if theme_fatigue is None else max(0.0, min(1.0, theme_fatigue))
+    if r > 0:
+        breakdown["theme_fatigue"] = round(-_FATIGUE_MAX * r, 1)
 
     times = cluster.times()
     velocity = 0.0

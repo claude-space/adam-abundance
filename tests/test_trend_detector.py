@@ -52,7 +52,7 @@ def test_score_rewards_novelty_gap_and_breaking():
     cluster = detector.cluster_signals(items)[0]
     score, breakdown = detector.score_cluster(cluster, covered=False)
     assert "outlet_breadth" not in breakdown           # replaced by novelty
-    assert breakdown["novelty"] == 8.0                 # 4 outlets: 20 - 3*4
+    assert breakdown["novelty"] == 7.2                 # 4 outlets: 18·(1 − 3/5)
     assert breakdown["coverage_gap"] == 15.0
     assert breakdown["breaking"] == 12.0               # "recalls"
     assert breakdown["velocity"] > 0
@@ -65,7 +65,49 @@ def test_score_rewards_novelty_gap_and_breaking():
     # novelty higher — the "get ahead of it" signal.
     scarce = detector.cluster_signals(items[:2])[0]
     _s2, bd2 = detector.score_cluster(scarce, covered=False)
-    assert bd2["novelty"] > breakdown["novelty"]       # 2 outlets: 20 - 1*4 = 16
+    assert bd2["novelty"] > breakdown["novelty"]       # 2 outlets: 18·(1 − 1/5) = 14.4
+
+
+def test_coverage_penalty_only_when_covered_and_fading():
+    # A well-covered story (many outlets → high saturation).
+    items = [_item("Tesla Model Y refresh spied testing again", s, hours_ago=h)
+             for s, h in [("a", 3), ("b", 2.5), ("c", 2), ("d", 1.5), ("e", 1), ("f", 0.5)]]
+    cluster = detector.cluster_signals(items)[0]
+
+    # Covered + doing WELL (positive momentum) → no saturation penalty (neutral).
+    _s_well, well = detector.score_cluster(cluster, topic_momentum=0.6)
+    assert "saturation_penalty" not in well
+
+    # Covered + doing POORLY (negative momentum) → a penalty appears and lowers the score.
+    s_poor, poor = detector.score_cluster(cluster, topic_momentum=-0.8)
+    assert poor["saturation_penalty"] < 0
+    assert s_poor < _s_well
+
+    # Not covered (few outlets) → momentum irrelevant, novelty dominates, no penalty.
+    scarce = detector.cluster_signals(items[:1] + [_item("unrelated honda thing", "z")])
+    scarce = [c for c in scarce if len(c.items) == 1][0]
+    _s, bd = detector.score_cluster(scarce, topic_momentum=-0.9)
+    assert "saturation_penalty" not in bd
+
+
+def test_theme_fatigue_penalty():
+    items = [_item("Kia EV9 GT unveiled with 500 hp", s) for s in ("motor1", "thedrive")]
+    cluster = detector.cluster_signals(items)[0]
+    _base_s, base = detector.score_cluster(cluster)
+    assert "theme_fatigue" not in base
+    s_fatigued, bd = detector.score_cluster(cluster, theme_fatigue=0.5)
+    assert bd["theme_fatigue"] == -7.5                 # −15 · 0.5
+    assert s_fatigued < _base_s
+
+
+def test_topic_similarity():
+    items = [_item("Tesla recalls 300,000 Model Y over steering fault", "motor1"),
+             _item("Tesla Model Y recall hits 300k vehicles", "carscoops")]
+    cluster = detector.cluster_signals(items)[0]
+    same = detector.topic_similarity(cluster, detector.tokens("Tesla Model Y recall grows"), ("tesla",))
+    diff = detector.topic_similarity(cluster, detector.tokens("Honda Civic hybrid first drive review"))
+    assert same > diff
+    assert 0.0 <= diff <= same <= 1.0
 
 
 def test_corroboration_scales_with_independent_monitors():
