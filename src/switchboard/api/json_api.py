@@ -15,6 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from ..config import get_settings
 from ..context import RunContext
+from ..trends import scoring
 from . import routes
 from .auth import require_user
 
@@ -242,6 +243,292 @@ async def pipeline_decline(request: Request, pipeline_id: int) -> dict[str, Any]
         except LifecycleError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "pipeline_id": pipeline_id, "status": "declined"}
+
+
+# --- Distribution / Artifacts (§16) -------------------------------------------
+# "Artifacts" are content_jobs across pipelines. These endpoints back the SPA's
+# Distribution table + the artifact-review detail page with REAL data: the
+# generated markdown body (via the artifact store), an LLM-scored quality +
+# five-factor breakdown (scored lazily on first view and persisted to
+# preview_meta), and fact-gate/voice signals. Plagiarism + est-traffic are
+# pluggable (return None until their APIs are configured → SPA renders "n/a").
+
+_DIST_STATUS = {
+    "queued": "queued", "generating": "queued",
+    "preview_ready": "review", "review": "review",
+    "approved": "approved", "published": "published",
+    "rejected": "rejected", "declined": "rejected",
+    "cancelled": "rejected", "failed": "rejected",
+}
+_KIND_LABEL = {
+    "article": "article", "social_post": "social post",
+    "newsletter_blurb": "newsletter", "video_script": "video",
+}
+
+
+def _artifact_id(job_id: int) -> str:
+    return f"AR-{job_id:04d}"
+
+
+def _parse_artifact_id(s: str) -> int | None:
+    try:
+        return int(str(s).rsplit("-", 1)[-1])
+    except (ValueError, IndexError):
+        return None
+
+
+def _clean_title(t: str | None, fallback: str) -> str:
+    import re
+    t = re.sub(r"^[-*#>\s]+", "", (t or "").strip())
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t).strip().strip("*").strip()
+    return t or fallback
+
+
+def _artifact_row(job: Any) -> dict[str, Any]:
+    """content_job → the Distribution list Artifact shape."""
+    meta = job.preview_meta or {}
+    brand = job.pipeline.brand if job.pipeline else "portfolio"
+    quality = meta.get("quality") or {}
+    return {
+        "id": _artifact_id(job.id),
+        "title": _clean_title(meta.get("title"), job.content_type.replace("_", " ")),
+        "brand": brand,
+        "kind": _KIND_LABEL.get(job.content_type, job.content_type.replace("_", " ")),
+        "status": _DIST_STATUS.get(job.status, "queued"),
+        "agent": "Production",
+        "words": int(meta.get("word_count") or 0),
+        "score": quality.get("score"),
+    }
+
+
+def _md_to_draft(md: str, *, title: str, brand: str, kind: str, generated: str,
+                 artifact_id: str) -> dict[str, Any]:
+    """Parse a real markdown draft into the magazine-layout fields the website
+    preview renders (dropcap lede → body → pull-quote → body). Keeps the exact
+    Lovable layout, populated with the artifact's real text."""
+    import re
+    # Drop the SEO/meta section the writer prepends (## SEO … until the next heading).
+    lines: list[str] = []
+    skip_seo = False
+    for ln in (md or "").splitlines():
+        s = ln.strip()
+        if re.match(r"^#{1,6}\s*SEO\b", s, re.I):
+            skip_seo = True
+            continue
+        if skip_seo:
+            if s.startswith("#"):
+                skip_seo = False
+            else:
+                continue
+        lines.append(ln)
+
+    paras: list[str] = []
+    quote: str | None = None
+    buf: list[str] = []
+
+    def flush() -> None:
+        nonlocal buf
+        if buf:
+            p = " ".join(x.strip() for x in buf).strip()
+            if len(p) > 1:
+                paras.append(p)
+        buf = []
+
+    for ln in lines:
+        s = ln.strip()
+        if not s:
+            flush()
+            continue
+        if s.startswith("#"):                       # heading → paragraph boundary
+            flush()
+            continue
+        if re.match(r"^-{3,}$", s):                 # --- horizontal rule
+            flush()
+            continue
+        if re.match(r"^-\s+\*\*.*\*\*\s*$", s):     # headline-option bullet (fully bold)
+            continue
+        if re.match(r"^\*\*[^*]+:\*\*", s):         # **Label:** metadata line
+            continue
+        if s.startswith(">"):
+            flush()
+            q = s.lstrip("> ").strip()
+            if q and quote is None:
+                quote = q
+            continue
+        s = re.sub(r"^[-*]\s+", "", s)
+        s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+        s = re.sub(r"\*(.+?)\*", r"\1", s)
+        s = re.sub(r"\[(.+?)\]\(.+?\)", r"\1", s)  # markdown links → text
+        buf.append(s)
+    flush()
+
+    lede = paras[0] if paras else title
+    rest = paras[1:]
+    if quote is None and rest:
+        sentences = [x.strip() for x in re.split(r"(?<=[.!?])\s+", " ".join(rest)) if len(x.strip()) > 30]
+        quote = max(sentences, key=len) if sentences else None
+    mid = max(1, len(rest) // 2)
+    kicker = {"article": "Feature", "social_post": "Social",
+              "newsletter_blurb": "Newsletter", "video_script": "Video"}.get(kind, "Draft")
+    return {
+        "kicker": kicker,
+        "headline": title,
+        "byline": f"By {brand.title()} AI",
+        "dateline": generated,
+        "domain": f"{brand}.com",
+        "slug": f"drafts/{artifact_id.lower()}",
+        "heroGradient": "linear-gradient(135deg,#1a1a1a,#3a3a3a)",
+        "heroBadge": f"{len((md or '').split())} words",
+        "dropcap": (lede[:1] or "T").upper(),
+        "lede": lede[1:] if lede else "",
+        "bodyOne": " ".join(rest[:mid]) if rest else "",
+        "pullQuote": quote or "",
+        "bodyTwo": " ".join(rest[mid:]) if len(rest) > mid else "",
+    }
+
+
+_BREAKDOWN_LABELS = [
+    ("factuality", "Factuality", "30%"), ("editorial_fit", "Editorial fit", "25%"),
+    ("freshness", "Freshness", "20%"), ("seo_ceiling", "SEO ceiling", "15%"),
+    ("brand_voice", "Brand voice", "10%"),
+]
+
+
+def _breakdown_rows(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{"label": lbl, "value": breakdown.get(k), "weight": w}
+            for k, lbl, w in _BREAKDOWN_LABELS]
+
+
+def _artifact_signals(breakdown: dict[str, Any], gate: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "fact_gate": gate["label"] if gate else None,
+        "voice_match": breakdown.get("brand_voice"),
+        "plagiarism": _plagiarism_signal(),
+        "seo_ceiling": breakdown.get("seo_ceiling"),
+        "est_traffic": _traffic_signal(),
+    }
+
+
+def _plagiarism_signal() -> str | None:
+    """Pluggable — wired when a plagiarism API (Copyscape/Originality.ai) is
+    configured. None → the SPA renders 'n/a'."""
+    return None
+
+
+def _traffic_signal() -> str | None:
+    """Pluggable — wired when an SEO/traffic API (Semrush/Ahrefs/GA4) is
+    configured. None → the SPA renders 'n/a'."""
+    return None
+
+
+def _artifact_timeline(job: Any, row: dict[str, Any]) -> list[dict[str, Any]]:
+    tl: list[dict[str, Any]] = []
+    micros = (job.cost or {}).get("llm_micros")
+    usd = f" · ${micros / 1e6:.2f} LLM" if micros else ""
+    tl.append({"at": routes._fmt_dt(job.created_at), "actor": f"{row['agent']} agent",
+               "event": "draft generated", "detail": f"{row['words']} words{usd}"})
+    for h in (job.history or []):
+        tl.append({"at": routes._fmt_dt(h.get("at")) if h.get("at") else "",
+                   "actor": "editorial", "event": "regenerated",
+                   "detail": h.get("instructions") or ""})
+    if job.reviewed_by:
+        tl.append({"at": routes._fmt_dt(job.reviewed_at), "actor": job.reviewed_by,
+                   "event": job.status, "detail": ""})
+    return tl
+
+
+async def _ensure_quality(ctx: RunContext, job: Any, body: str) -> dict[str, Any]:
+    """Return the job's stored quality; if missing, LLM-score the body once and
+    persist it to preview_meta so future reads are free."""
+    meta = dict(job.preview_meta or {})
+    quality = meta.get("quality")
+    if quality or not body:
+        return quality or {}
+    brand = job.pipeline.brand if job.pipeline else "portfolio"
+    scored = await scoring.score_draft(ctx, brand, job.content_type, body)
+    if not scored:
+        return {}
+    quality = {"score": scored["score"], "breakdown": scored["breakdown"], "note": scored["note"]}
+    meta["quality"] = quality
+    job.preview_meta = meta
+    await ctx.session.flush()
+    return quality
+
+
+@router.get("/artifacts")
+async def artifacts_list(request: Request, brand: str | None = None) -> dict[str, Any]:
+    """Distribution: content artifacts staged for review, newest first."""
+    require_user(request)
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from ..db.models import ContentJob, ContentPipeline
+    async with RunContext.open() as ctx:
+        q = (select(ContentJob)
+             .options(selectinload(ContentJob.pipeline))
+             .join(ContentPipeline, ContentPipeline.id == ContentJob.pipeline_id)
+             .where(ContentJob.status != "cancelled")
+             .order_by(ContentJob.id.desc()).limit(50))
+        if brand:
+            q = q.where(ContentPipeline.brand == brand)
+        jobs = list((await ctx.session.execute(q)).scalars().all())
+        # Lazily score any unscored jobs (bounded) so the table shows real scores.
+        scored_budget = 12
+        for j in jobs:
+            meta = j.preview_meta or {}
+            if not (meta.get("quality")) and j.preview_ref and scored_budget > 0:
+                body = routes._artifact_text(j.preview_ref)
+                if body:
+                    await _ensure_quality(ctx, j, body)
+                    scored_budget -= 1
+        rows = [_artifact_row(j) for j in jobs]
+    counts = {
+        "review": sum(1 for r in rows if r["status"] == "review"),
+        "rejected": sum(1 for r in rows if r["status"] == "rejected"),
+        "published": sum(1 for r in rows if r["status"] == "published"),
+    }
+    return {"artifacts": rows, "counts": counts}
+
+
+@router.get("/artifacts/{artifact_id}")
+async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
+    """One artifact: metadata + parsed article draft + score breakdown + signals
+    + timeline — the full artifact-review surface, on real data."""
+    require_user(request)
+    job_id = _parse_artifact_id(artifact_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from ..db.models import ContentJob, ContentPipeline
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob)
+            .options(selectinload(ContentJob.pipeline).selectinload(ContentPipeline.trend))
+            .where(ContentJob.id == job_id))).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        brand = job.pipeline.brand if job.pipeline else "portfolio"
+        trend = job.pipeline.trend if job.pipeline else None
+        body = routes._artifact_text(job.preview_ref) if job.preview_ref else ""
+        quality = await _ensure_quality(ctx, job, body)
+        breakdown = quality.get("breakdown") or {}
+        row = _artifact_row(job)
+        generated = routes._fmt_dt(job.created_at)
+        detail = {
+            **row,
+            "generated_at": generated,
+            "cost": job.cost,
+            "note": quality.get("note"),
+            "article": _md_to_draft(body, title=row["title"], brand=brand,
+                                    kind=job.content_type, generated=generated, artifact_id=row["id"]),
+            "breakdown": _breakdown_rows(breakdown),
+            "signals": _artifact_signals(breakdown, scoring.fact_gate(trend)),
+            "timeline": _artifact_timeline(job, row),
+            "may_approve": routes._can_approve(request, brand),
+        }
+    return detail
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
