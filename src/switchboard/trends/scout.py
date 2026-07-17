@@ -86,6 +86,7 @@ class TrendScout:
         hc_titles = await self._hc_viral_titles()
         dr_titles = await self._daily_reporting_titles()
         neigh = await self._neighborhood_trends(brand)
+        session_mom = await self._session_momentum()
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
@@ -110,8 +111,9 @@ class TrendScout:
                 monitors.append("daily_reporting")
             if monitors:
                 summary["corroborated"] += 1
-            # Neighbourhood signals (§13.19 F2/F3): same-topic momentum + adjacent fatigue.
-            momentum, fatigue = self._cluster_signals(cluster, neigh)
+            # Neighbourhood signals (§13.19 F2/F3): same-topic momentum (real
+            # reader-session slope, proxy fallback) + adjacent-theme fatigue.
+            momentum, fatigue = self._cluster_signals(cluster, neigh, session_mom)
             score, breakdown = detector.score_cluster(
                 cluster, watchlist=cfg.watchlist, covered=covered,
                 corroborating_monitors=monitors,
@@ -267,24 +269,69 @@ class TrendScout:
             })
         return out
 
-    def _cluster_signals(self, cluster: Any,
-                         neigh: list[dict[str, Any]]) -> tuple[float | None, float | None]:
+    def _cluster_signals(self, cluster: Any, neigh: list[dict[str, Any]],
+                         session_mom: dict[str, float]) -> tuple[float | None, float | None]:
         """(topic_momentum q, theme_fatigue r) for a cluster from its neighbourhood.
-        q = momentum of the best-matching same-topic (sim≥0.6) recurring trend
-        (F2 — is THIS topic performing?); r = max similarity×decline over adjacent
-        (0.3≤sim<0.6), aging, declining themes (F3 — is the theme tiring?)."""
-        q: float | None = None
+
+        q (F2 — is THIS topic performing?) prefers the REAL per-OEM reader-session
+        slope for the cluster's make(s); it falls back to the best same-topic
+        (sim≥0.6) recurring trend's lifecycle momentum only when we have no session
+        signal. r (F3 — is an adjacent theme tiring?) = max similarity×decline over
+        adjacent (0.3≤sim<0.6), aging, declining themes."""
+        from .sessions import momentum_for_oems
+
+        q: float | None = momentum_for_oems(cluster.oem_anchor, session_mom)  # real sessions first
         best = 0.0
         r = 0.0
         for nb in neigh:
             sim = detector.topic_similarity(cluster, nb["tokens"], nb["oems"])
             if sim >= _SAME_TOPIC_SIM:
-                if sim > best:
+                if q is None and sim > best:            # proxy only when no session signal
                     best, q = sim, _STATE_MOMENTUM.get(nb["state"], 0.0)
             elif sim >= _ADJACENT_SIM and nb["age_days"] >= _FATIGUE_AGE_DAYS \
                     and nb["state"] in _STATE_DECLINE:
                 r = max(r, round(sim * _STATE_DECLINE[nb["state"]], 3))
         return q, (r or None)
+
+    async def _session_momentum(self) -> dict[str, float]:
+        """Per-OEM reader-session momentum from the consum table (last 8 weeks,
+        portfolio-wide): are our articles on a given make trending up or down in
+        sessions? Feeds F2's same-topic performance q with real data (§13.19).
+        Governor-guarded; soft-empty on any failure — a refinement, not a
+        dependency."""
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from .sessions import compute_session_momentum
+
+        try:
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except AdapterUnavailable:
+            return {}
+        brands = [b.short_code for k, b in self.ctx.settings.brands.items() if k != "portfolio"]
+        if not brands:
+            return {}
+        sql = f"""
+            SELECT ArticleTitle AS title, COALESCE(ActSessSentinel, 0) AS sessions,
+                   FORMAT_DATE('%G%V', PubDate) AS week
+            FROM {_CONSUM_TABLE}
+            WHERE Brand IN UNNEST(@brands)
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 56 DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+              AND ArticleTitle IS NOT NULL AND ArticleTitle != '' AND ContentType != 'Resource'
+        """
+        params = {"brands": brands}
+        try:
+            estimated = await client.estimate_bytes(sql, params)
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=estimated):
+                log.info("[scout] session-momentum skipped — bq_bytes cap")
+                return {}
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[scout] session-momentum query failed: %s", exc)
+            return {}
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "trend_scout")
+        return compute_session_momentum(res.rows)
 
     async def _update_lifecycle(self, brand: str) -> int:
         """Record today's activity for the brand's tracked trends, recompute each
