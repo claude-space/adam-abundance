@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 
 from ..config import get_settings
 from ..context import RunContext
@@ -141,8 +141,21 @@ async def trends(request: Request, brand: str | None = None) -> dict[str, Any]:
         coverage = await routes._brand_coverage(ctx, list(settings.brand_keys))
     for row in (*open_trends, *recent_closed, *pipelines):
         row["may_approve"] = routes._can_approve(request, row.get("brand", ""))
+    # Header stat pills + the threshold/outlets/dedup config shown in the description.
+    # Derived from the same rows so the counts never drift from the tables below.
+    tcfg = settings.trends
+    stats = {
+        "open": sum(1 for t in open_trends if not t.get("pending_pipeline_id")),
+        "pending": sum(1 for t in open_trends if t.get("pending_pipeline_id")),
+        "generating": sum(1 for p in pipelines if p.get("status") in ("approved", "generating")),
+        "previews": sum(1 for p in pipelines if p.get("status") == "previews_ready"),
+        "gaps": sum(int(c.get("gaps") or 0) for c in coverage),
+    }
+    config = {"score_threshold": tcfg.score_threshold, "min_sources": tcfg.min_sources,
+              "dedup_days": tcfg.dedup_days}
     return {"open_trends": open_trends, "recent_closed": recent_closed,
-            "pipelines": pipelines, "coverage": coverage, "brands": list(settings.brand_keys)}
+            "pipelines": pipelines, "coverage": coverage, "brands": list(settings.brand_keys),
+            "stats": stats, "config": config}
 
 
 @router.get("/pipelines")
@@ -159,3 +172,82 @@ async def pipelines(request: Request, brand: str | None = None,
         counts[p["status"]] = counts.get(p["status"], 0) + 1
         p["may_approve"] = routes._can_approve(request, p.get("brand", ""))
     return {"pipelines": pipelines, "counts": counts}
+
+
+# --- Trend Radar actions (JSON siblings of the HTML form routes) --------------
+# Same business logic, same per-brand RBAC gate (``_can_approve``) as the
+# server-rendered routes; the SPA calls these with ``credentials:'include'`` so
+# the session cookie carries the caller's role. Approving/scanning spend money
+# (LLM + paid source APIs), so they are gated to approvers, never viewers.
+
+
+@router.post("/trends/scan")
+async def trends_scan(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Kick a real trend scan in the background for the caller's brand scope."""
+    user = require_user(request)
+    body = await _json_body(request)
+    brand = (body.get("brand") or "portfolio").strip() or "portfolio"
+    settings = get_settings()
+    if not settings.is_valid_scope(brand):
+        raise HTTPException(status_code=400, detail=f"unknown brand '{brand}'")
+    if not routes._can_approve(request, brand):
+        raise HTTPException(status_code=403, detail="not permitted for this brand")
+    from ..trends.scout import run_trend_scan
+
+    background_tasks.add_task(run_trend_scan, brand)
+    return {"ok": True, "scanning": brand}
+
+
+@router.post("/pipelines/{pipeline_id}/approve")
+async def pipeline_approve(request: Request, background_tasks: BackgroundTasks,
+                           pipeline_id: int) -> dict[str, Any]:
+    """Approve a pending pipeline and start generation (spends money)."""
+    user = require_user(request)
+    body = await _json_body(request)
+    picked = body.get("content_types") or None
+    instructions = (body.get("instructions") or "").strip() or None
+    from ..trends.lifecycle import LifecycleError
+    from ..trends.pipeline import approve_and_start, run_job_sweep
+    async with RunContext.open() as ctx:
+        pipeline = await routes.PipelineRepo(ctx.session).get(pipeline_id)
+        if pipeline is None:
+            raise HTTPException(status_code=404, detail="pipeline not found")
+        if not routes._can_approve(request, pipeline.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        try:
+            await approve_and_start(ctx, pipeline_id, user["email"],
+                                    content_types=picked, instructions=instructions)
+        except LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    background_tasks.add_task(run_job_sweep)
+    return {"ok": True, "pipeline_id": pipeline_id, "status": "approved"}
+
+
+@router.post("/pipelines/{pipeline_id}/decline")
+async def pipeline_decline(request: Request, pipeline_id: int) -> dict[str, Any]:
+    """Decline a pending pipeline request and close it out."""
+    user = require_user(request)
+    body = await _json_body(request)
+    reason = (body.get("reason") or "").strip() or None
+    from ..trends.lifecycle import LifecycleError
+    from ..trends.pipeline import decline_pipeline
+    async with RunContext.open() as ctx:
+        pipeline = await routes.PipelineRepo(ctx.session).get(pipeline_id)
+        if pipeline is None:
+            raise HTTPException(status_code=404, detail="pipeline not found")
+        if not routes._can_approve(request, pipeline.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        try:
+            await decline_pipeline(ctx, pipeline_id, user["email"], reason)
+        except LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "pipeline_id": pipeline_id, "status": "declined"}
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    """Tolerant JSON-body read — the SPA may POST an empty body for no-arg actions."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
