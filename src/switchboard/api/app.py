@@ -84,7 +84,10 @@ def create_app() -> FastAPI:
         async def _spa_shell(request: Request, call_next):
             if request.method not in ("GET", "HEAD"):
                 return await call_next(request)
-            path = request.url.path
+            # scope["path"], NOT request.url.path: with root_path (APP_BASE_PATH)
+            # set, url.path is the EXTERNAL path (prefix included) while the
+            # proxy-stripped path the app actually routes on lives in the scope.
+            path = request.scope.get("path", "/")
             if any(path == p or path.startswith(p + "/") for p in passthrough):
                 return await call_next(request)
             # Real file in the build (hashed assets, brand images, favicon)?
@@ -92,8 +95,10 @@ def create_app() -> FastAPI:
             if target.is_relative_to(spa_dir) and target.is_file():
                 return FileResponse(target)
             # Page navigation → the client-router shell, behind the login gate.
+            # Prefix the redirect ourselves: this response short-circuits, so it
+            # never passes through the inner _basepath rewrite middleware.
             if request.session.get("user") is None:
-                return RedirectResponse("/auth/login", status_code=302)
+                return RedirectResponse(f"{base_path}/auth/login", status_code=302)
             return FileResponse(shell, media_type="text/html")
 
         log.info("SPA co-hosting enabled: serving %s", spa_dir)
