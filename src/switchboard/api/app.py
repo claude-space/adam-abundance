@@ -6,8 +6,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.responses import Response
@@ -62,6 +62,41 @@ def create_app() -> FastAPI:
                 rewritten.raw_headers = raw + [(b"content-length", str(len(new_body)).encode())]
                 return rewritten
             return response
+
+    # SPA co-hosting (opt-in via SPA_DIST_DIR → the story-unraveler-tool
+    # SPA_SHELL=1 build's dist/client). When active, every page GET serves the
+    # React console — assets resolve from the dist dir, unknown paths get the
+    # client-router shell (signed-in) or a redirect to login. /api, /auth,
+    # /static, docs, and healthz stay server-owned; POSTs fall through
+    # untouched. Unset → the classic Jinja2 console serves exactly as before.
+    # NOTE: registered BEFORE SessionMiddleware so it runs inside it (added-
+    # earlier = inner middleware) and request.session is available.
+    spa_dir = Path(settings.spa_dist_dir).resolve() if settings.spa_dist_dir else None
+    if spa_dir is not None and not (spa_dir / "_shell.html").is_file():
+        log.warning("SPA_DIST_DIR set but %s/_shell.html not found — SPA serving disabled", spa_dir)
+        spa_dir = None
+    if spa_dir is not None:
+        shell = spa_dir / "_shell.html"
+        passthrough = ("/api", "/auth", "/static", "/docs", "/openapi.json",
+                       "/redoc", "/healthz")
+
+        @app.middleware("http")
+        async def _spa_shell(request: Request, call_next):
+            if request.method not in ("GET", "HEAD"):
+                return await call_next(request)
+            path = request.url.path
+            if any(path == p or path.startswith(p + "/") for p in passthrough):
+                return await call_next(request)
+            # Real file in the build (hashed assets, brand images, favicon)?
+            target = (spa_dir / path.lstrip("/")).resolve()
+            if target.is_relative_to(spa_dir) and target.is_file():
+                return FileResponse(target)
+            # Page navigation → the client-router shell, behind the login gate.
+            if request.session.get("user") is None:
+                return RedirectResponse("/auth/login", status_code=302)
+            return FileResponse(shell, media_type="text/html")
+
+        log.info("SPA co-hosting enabled: serving %s", spa_dir)
 
     app.add_middleware(SessionMiddleware, secret_key=settings.creds.session_secret(), https_only=False)
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
