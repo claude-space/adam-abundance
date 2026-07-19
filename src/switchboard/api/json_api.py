@@ -605,3 +605,947 @@ async def _json_body(request: Request) -> dict[str, Any]:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+# ==============================================================================
+# Remaining SPA surfaces — each endpoint reuses the HTML page's gatherers (or
+# the same tables) so the JSON and server-rendered views never drift. Where the
+# design shows a value the backend can't source, the endpoint returns null and
+# the SPA renders a placeholder — never a fabricated number.
+# ==============================================================================
+
+
+@router.get("/observability")
+async def observability(request: Request, limit: int = 60) -> dict[str, Any]:
+    """Live event stream + KPI pills. latency_p95_ms is always null — no
+    duration column exists on tool_call_log (honest placeholder)."""
+    require_user(request)
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import case, func, select
+
+    from ..db.models import ToolCallLog
+    limit = min(max(limit, 1), 200)
+    now = datetime.now(timezone.utc)
+    async with RunContext.open() as ctx:
+        raw = await routes._activity_events(ctx, limit)
+        failed, completed = (await ctx.session.execute(
+            select(func.coalesce(func.sum(case((ToolCallLog.ok.is_(False), 1), else_=0)), 0),
+                   func.count())
+            .where(ToolCallLog.ok.is_not(None),
+                   ToolCallLog.created_at >= now - timedelta(hours=24)))).one()
+        req_1h = (await ctx.session.execute(
+            select(func.count()).select_from(ToolCallLog)
+            .where(ToolCallLog.created_at >= now - timedelta(hours=1)))).scalar_one()
+    events = []
+    for i, ev in enumerate(raw):
+        when = ev.get("when") or ""
+        ts = when.split(" ")[1] if " " in when else (ev.get("ago") or "")
+        level = {"bad": "error", "warn": "warn"}.get(ev.get("severity"), "info")
+        agent, system = ev.get("agent"), ev.get("system")
+        source = f"{agent}.{system}" if agent and system else (agent or system or "system")
+        events.append({"id": f"E-{i}", "ts": ts, "level": level, "source": source,
+                       "message": ev.get("message")})
+    error_rate = round(100 * int(failed) / int(completed), 1) if completed else None
+    return {"kpis": {"error_rate_pct": error_rate, "latency_p95_ms": None,
+                     "requests_1h": int(req_1h)},
+            "events": events}
+
+
+# --- Users (admin) -------------------------------------------------------------
+
+
+@router.get("/users")
+async def users_list(request: Request) -> dict[str, Any]:
+    """User directory — global-admin only, mirroring the HTML /users gate."""
+    u = require_user(request)
+    from ..rbac import ROLE_LABELS, Role, can_manage_users
+    from ..users import UserRepo
+    if not can_manage_users(u.get("role", "viewer")):
+        raise HTTPException(status_code=403, detail="global admin only")
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        rows = await UserRepo(ctx.session).list()
+        users = [{"email": r.email, "name": r.name, "role": r.role,
+                  "role_label": ROLE_LABELS.get(r.role, r.role), "brands": r.brands or [],
+                  # No invited/revoked lifecycle exists; no last-seen tracking → null.
+                  "status": "active", "last_seen": None,
+                  "created_at": r.created_at.strftime("%Y-%m-%d") if r.created_at else ""}
+                 for r in rows]
+    counts = {r.value: 0 for r in Role}
+    for x in users:
+        counts[x["role"]] = counts.get(x["role"], 0) + 1
+    return {"users": users, "role_counts": counts, "roles": [r.value for r in Role],
+            "role_labels": dict(ROLE_LABELS), "brands": list(settings.brand_keys)}
+
+
+@router.post("/users/invite")
+async def users_invite(request: Request) -> dict[str, Any]:
+    """Pre-assign a role to an email (applies at first sign-in). No email is
+    actually sent — there is no mail infra; this provisions + sets the role."""
+    u = require_user(request)
+    from ..rbac import can_manage_users, is_valid_role
+    from ..users import UserRepo
+    if not can_manage_users(u.get("role", "viewer")):
+        raise HTTPException(status_code=403, detail="global admin only")
+    body = await _json_body(request)
+    email = str(body.get("email") or "").lower().strip()
+    role = str(body.get("role") or "").strip()
+    brands = body.get("brands") or None
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="valid email required")
+    if not is_valid_role(role):
+        raise HTTPException(status_code=400, detail="invalid role")
+    async with RunContext.open() as ctx:
+        repo = UserRepo(ctx.session)
+        await repo.provision(email, None)
+        try:
+            await repo.set_role(email, role, brands)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "email": email, "role": role}
+
+
+@router.post("/users/set-role")
+async def users_set_role(request: Request) -> dict[str, Any]:
+    """JSON sibling of the HTML set-role form action."""
+    u = require_user(request)
+    from ..rbac import can_manage_users, is_valid_role
+    from ..users import UserRepo
+    if not can_manage_users(u.get("role", "viewer")):
+        raise HTTPException(status_code=403, detail="global admin only")
+    body = await _json_body(request)
+    email = str(body.get("email") or "").lower().strip()
+    role = str(body.get("role") or "").strip()
+    if not email or not is_valid_role(role):
+        raise HTTPException(status_code=400, detail="email + valid role required")
+    async with RunContext.open() as ctx:
+        try:
+            await UserRepo(ctx.session).set_role(email, role, body.get("brands") or None)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+# --- Governor -------------------------------------------------------------------
+
+
+@router.get("/governor")
+async def governor(request: Request) -> dict[str, Any]:
+    """Kill switch, the three real metered caps, spend snapshot, and the
+    code-enforced guardrails (as data, so nothing fabricated renders)."""
+    require_user(request)
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        spend = await routes._spend_snapshot(ctx)
+        deltas = await routes._spend_deltas(ctx, spend)
+        resources = await routes._resource_usage(ctx, spend, deltas)
+
+    def cap_row(name: str, metric: str, fmt) -> dict[str, Any]:
+        cap = settings.caps.per_day(metric)
+        spent = spend[metric]["spent_today"]
+        return {"name": name, "scope": "portfolio",
+                "limit": fmt(cap) if cap else "no cap set",
+                "used": fmt(spent),
+                "pct": int(round(spend[metric]["pct"] or 0))}
+
+    caps = [
+        cap_row("LLM daily spend", "llm_micros", lambda v: f"${(v or 0) / 1e6:.2f}"),
+        cap_row("BigQuery scan", "bq_bytes", routes._fmt_bytes),
+        cap_row("Ahrefs units", "ahrefs_units", lambda v: f"{int(v or 0):,}"),
+    ]
+    rules = [
+        {"id": "approval_gate", "name": "Require human approval before CMS publish",
+         "description": "No dispatch to Valnet CMS without an editor click-through.",
+         "enabled": True},
+        {"id": "dry_run_default", "name": "Dry-run by default on live actions",
+         "description": "Action adapters run dry unless a run explicitly requests live.",
+         "enabled": settings.dry_run_default},
+        {"id": "daily_caps", "name": "Hard-stop at daily spend caps",
+         "description": "Governor blocks metered calls once a daily cap is hit until reset.",
+         "enabled": settings.caps.enabled, "threshold": 100, "unit": "%"},
+        {"id": "kill_switch", "name": "Kill switch halts dispatch",
+         "description": "Observe still runs; nothing dispatches while engaged.",
+         "enabled": settings.kill_switch},
+    ]
+    return {"kill_switch": settings.kill_switch, "caps_enabled": settings.caps.enabled,
+            "caps": caps, "resources": resources, "rules": rules}
+
+
+# --- Morning plans + plan-item approvals ----------------------------------------
+
+
+def _item_title(it: dict[str, Any]) -> str:
+    params = it.get("params") or {}
+    for k in ("title", "name", "message"):
+        v = params.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return str(it.get("action_type") or "").replace("_", " ").capitalize()
+
+
+def _linked_memory(params: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    if params.get("trend_id") is not None:
+        out.append(f"trend:{params['trend_id']}")
+    if params.get("topic_id") is not None:
+        out.append(f"topic:{params['topic_id']}")
+    for k in ("report_entry_id", "draft_entry_id"):
+        if params.get(k) is not None:
+            out.append(f"memory:{params[k]}")
+    return out
+
+
+def _morning_plan_dict(plan: Any, rates: dict[str, float]) -> dict[str, Any]:
+    """routes._plan_dict + the SPA's derived fields (USD costs, titles, brief)."""
+    from .. import pricing
+    base = routes._plan_dict(plan)
+    proposed = 0
+    total_usd = 0.0
+    for it in base["items"]:
+        est = it.get("cost_estimate") or {}
+        usd = round(sum(pricing.metric_to_usd(m, amt or 0, bq_tb=rates["bq_tb"],
+                                              ahrefs_unit=rates["ahrefs_unit"])
+                        for m, amt in est.items()), 2)
+        conv: dict[str, Any] = {}
+        if est.get("ahrefs_units"):
+            conv["ahrefs_units"] = int(est["ahrefs_units"])
+        if est.get("llm_micros"):
+            conv["llm_usd"] = round(est["llm_micros"] / 1e6, 2)
+        if est.get("bq_bytes"):
+            conv["bq_mb"] = round(est["bq_bytes"] / 1048576)
+        it["cost_estimate"] = conv
+        it["cost_usd"] = usd
+        it["brand"] = base["brand"]
+        it["title"] = _item_title(it)
+        it["rationale"] = it.get("rationale") or ""
+        it["params"] = it.get("params") or {}
+        it["linked_memory"] = _linked_memory(it["params"])
+        if it["status"] == "proposed":
+            proposed += 1
+        total_usd += usd
+    # No slack_brief column exists — deterministic summary from real row data only.
+    base["slack_brief"] = (f"{base['brand'].title()} • {proposed} proposed item(s) · "
+                           f"est ${total_usd:.2f} · dry-run by default.")
+    return base
+
+
+@router.get("/plans")
+async def plans_index(request: Request) -> dict[str, Any]:
+    """Morning-plan overview: the latest plan per brand."""
+    require_user(request)
+    from .. import pricing
+    from ..orchestrator.plans import PlanRepo
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        rates = await pricing.load_rates(ctx.session)
+        repo = PlanRepo(ctx.session)
+        out = []
+        for b in settings.brand_keys:
+            p = await repo.latest_plan(b)
+            if p is not None:
+                out.append(_morning_plan_dict(p, rates))
+    return {"plans": out}
+
+
+@router.get("/plans/{plan_id}")
+async def plan_detail(request: Request, plan_id: int) -> dict[str, Any]:
+    require_user(request)
+    from .. import pricing
+    from ..orchestrator.plans import PlanRepo
+    async with RunContext.open() as ctx:
+        plan = await PlanRepo(ctx.session).get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="plan not found")
+        rates = await pricing.load_rates(ctx.session)
+        out = _morning_plan_dict(plan, rates)
+        out["can_approve"] = routes._can_approve(request, out["brand"])
+    return out
+
+
+@router.post("/items/{item_id}/approve")
+@router.post("/approvals/{item_id}/approve")
+async def item_approve_api(request: Request, item_id: int) -> dict[str, Any]:
+    """Approve one plan item (both the morning-plan and approvals screens call
+    this). Plan looked up server-side from the item — never a caller param."""
+    user = require_user(request)
+    body = await _json_body(request)
+    go_live = bool(body.get("go_live"))
+    from ..db.models import PlanItem
+    from ..orchestrator.plans import ApprovalError, PlanRepo
+    async with RunContext.open() as ctx:
+        item = await ctx.session.get(PlanItem, item_id)
+        if item is None or item.plan_id is None:
+            raise HTTPException(status_code=404, detail="plan item not found")
+        plan = await PlanRepo(ctx.session).get_plan(item.plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="plan not found")
+        if not routes._can_approve(request, plan.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        try:
+            await PlanRepo(ctx.session).approve_item(item_id, user["email"], go_live=go_live)
+        except ApprovalError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "plan_item_id": item_id, "status": "approved", "dry_run": not go_live}
+
+
+@router.post("/items/{item_id}/reject")
+@router.post("/approvals/{item_id}/reject")
+async def item_reject_api(request: Request, item_id: int) -> dict[str, Any]:
+    user = require_user(request)
+    from ..db.models import PlanItem
+    from ..orchestrator.plans import ApprovalError, PlanRepo
+    async with RunContext.open() as ctx:
+        item = await ctx.session.get(PlanItem, item_id)
+        if item is None or item.plan_id is None:
+            raise HTTPException(status_code=404, detail="plan item not found")
+        plan = await PlanRepo(ctx.session).get_plan(item.plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="plan not found")
+        if not routes._can_approve(request, plan.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        try:
+            await PlanRepo(ctx.session).reject_item(item_id, user["email"])
+        except ApprovalError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "plan_item_id": item_id, "status": "rejected"}
+
+
+@router.post("/plans/{plan_id}/dispatch")
+async def plan_dispatch_api(request: Request, plan_id: int) -> dict[str, Any]:
+    """Dispatch an approved plan (JSON sibling of the HTML dispatch action)."""
+    require_user(request)
+    from ..orchestrator.dispatch import DispatchError, Dispatcher
+    from ..orchestrator.plans import PlanRepo
+    async with RunContext.open() as ctx:
+        plan = await PlanRepo(ctx.session).get_plan(plan_id)
+        if plan is None:
+            raise HTTPException(status_code=404, detail="plan not found")
+        if not routes._can_approve(request, plan.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        try:
+            summary = await Dispatcher(ctx).dispatch_plan(plan_id)
+        except DispatchError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "summary": summary}
+
+
+# --- Approvals queue -------------------------------------------------------------
+
+# Deterministic risk tier per action_type (mirrors the dispatcher's side-effect
+# surface: external publish/send = high; external task/spend = medium; internal
+# generation = low). Derived from a real column — documented, not fabricated.
+_ACTION_RISK = {
+    "emaki_publish_draft": "high", "send_digest_email": "high",
+    "create_asana_task": "medium", "route_to_writer": "medium", "queue_decay_refresh": "medium",
+    "trigger_ideation": "low", "assemble_newsletter": "low", "assemble_social_post": "low",
+    "assemble_digest": "low", "notify": "low",
+}
+
+
+@router.get("/approvals")
+async def approvals_list(request: Request, brand: str | None = None,
+                         limit: int = 50) -> dict[str, Any]:
+    """The undecided queue: every proposed plan item across recent plans."""
+    require_user(request)
+    from datetime import datetime, timezone
+
+    from .. import pricing
+    from ..orchestrator.plans import PlanRepo
+    limit = min(max(limit, 1), 200)
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    async with RunContext.open() as ctx:
+        rates = await pricing.load_rates(ctx.session)
+        plans = await PlanRepo(ctx.session).list_plans(50)
+        rows = []
+        for plan in plans:
+            if brand and plan.brand != brand:
+                continue
+            for item in plan.items or []:
+                if item.status != "proposed":
+                    continue
+                est = item.cost_estimate or {}
+                usd = round(sum(pricing.metric_to_usd(m, amt or 0, bq_tb=rates["bq_tb"],
+                                                      ahrefs_unit=rates["ahrefs_unit"])
+                                for m, amt in est.items()), 2)
+                rows.append({
+                    "id": str(item.id), "ts": routes._ago(item.created_at),
+                    "brand": plan.brand, "plan_id": plan.id, "plan_item_id": item.id,
+                    "action_type": item.action_type,
+                    "title": (item.rationale or
+                              item.action_type.replace("_", " ").capitalize()),
+                    "requested_by": plan.created_by, "cost_usd": usd,
+                    "risk": _ACTION_RISK.get(item.action_type, "medium"),
+                    "dry_run": bool(item.dry_run),
+                    "may_approve": routes._can_approve(request, plan.brand),
+                    "_created": item.created_at or epoch,
+                })
+    rows.sort(key=lambda r: r["_created"], reverse=True)
+    for r in rows:
+        r.pop("_created", None)
+    return {"approvals": rows[:limit]}
+
+
+# --- Memory ledger ---------------------------------------------------------------
+# Path is /memory/ledger (not /memory): routes.py's legacy /api/memory CSV export
+# registers first and would shadow a plain /memory here.
+
+
+@router.get("/memory/ledger")
+async def memory_ledger(request: Request, brand: str | None = None,
+                        type: str | None = None, agent: str | None = None,
+                        verified: bool | None = None, limit: int = 50) -> dict[str, Any]:
+    require_user(request)
+    from sqlalchemy import func, select
+
+    from ..db.enums import EntryType
+    from ..db.models import MemoryEntry
+    limit = min(max(limit, 1), 200)
+    types = None
+    if type:
+        try:
+            types = [EntryType(type)]
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"unknown type '{type}'")
+    async with RunContext.open() as ctx:
+        rows = await ctx.store.query(brand=brand or None, include_portfolio=True,
+                                     types=types, source_agent=agent or None,
+                                     verified=verified, status=None, limit=limit)
+        counts = dict((await ctx.session.execute(
+            select(MemoryEntry.source_agent, func.count())
+            .where(MemoryEntry.status == "active")
+            .group_by(MemoryEntry.source_agent))).all())
+        total = (await ctx.session.execute(
+            select(func.count()).select_from(MemoryEntry)
+            .where(MemoryEntry.status == "active"))).scalar_one()
+    entries = []
+    for r in rows:
+        p = r.payload or {}
+        subject = (p.get("statement") or p.get("headline") or p.get("summary")
+                   or p.get("title") or p.get("note") or p.get("url")
+                   or p.get("kind") or r.type.value)
+        ago = routes._ago(r.created_at)
+        if ago.endswith(" ago"):        # the SPA appends " ago" itself
+            ago = ago[:-4]
+        entries.append({"id": f"M-{r.id}", "entry_id": r.id, "agent": r.source_agent,
+                        "type": r.type.value, "subject": subject, "brand": r.brand,
+                        "ago": ago,
+                        "facts": None,   # no per-entry fact count exists → SPA renders "—"
+                        "sources": len(r.source_urls or []),
+                        "verified": bool(r.verified), "kind": p.get("kind")})
+    seen: set[str] = set()
+    by_agent = []
+    for meta in (*routes.AGENT_META, *routes.FEEDER_META):
+        k = meta["key"]
+        seen.add(k)
+        by_agent.append({"key": k, "display": meta["display"],
+                         "entries": int(counts.get(k, 0))})
+    for k, c in counts.items():
+        if k not in seen:
+            by_agent.append({"key": k, "display": k, "entries": int(c)})
+    return {"entries": entries, "by_agent": by_agent, "total": int(total)}
+
+
+# --- Expenditure -----------------------------------------------------------------
+
+
+@router.get("/expenditure")
+async def expenditure_api(request: Request) -> dict[str, Any]:
+    """Per-pipeline AI costs + the four chart ranges, bucketed server-side from
+    the same ledger the governor caps. human_* stays null until writer-pay
+    baselines exist (Phase 10c) — never synthesized."""
+    u = require_user(request)
+    may_see_pay = u.get("role") in ("global_admin", "portfolio_admin")
+    from datetime import date, datetime, timedelta, timezone
+
+    from sqlalchemy import extract, func, select
+
+    from .. import pricing
+    from ..db.models import ContentPipeline, PipelineCost, SpendLedger, Trend
+    async with RunContext.open() as ctx:
+        rates = await pricing.load_rates(ctx.session)
+
+        def usd(metric: str, amt: Any) -> float:
+            return pricing.metric_to_usd(metric, amt or 0, bq_tb=rates["bq_tb"],
+                                         ahrefs_unit=rates["ahrefs_unit"])
+
+        pcs = list((await ctx.session.execute(
+            select(PipelineCost).order_by(PipelineCost.completed_at.desc())
+            .limit(100))).scalars().all())
+        ids = []
+        for r in pcs:
+            rid = r.pipeline_run_id or ""
+            if rid.startswith("pipeline:"):
+                try:
+                    ids.append(int(rid.split(":", 1)[1]))
+                except ValueError:
+                    pass
+        titles: dict[int, str | None] = {}
+        if ids:
+            trows = (await ctx.session.execute(
+                select(ContentPipeline.id, Trend.headline)
+                .join(Trend, Trend.id == ContentPipeline.trend_id, isouter=True)
+                .where(ContentPipeline.id.in_(ids)))).all()
+            titles = {i: h for i, h in trows}
+        rows = []
+        for r in pcs:
+            bd = r.cost_breakdown or {}
+            rid = r.pipeline_run_id or ""
+            pid = None
+            if rid.startswith("pipeline:"):
+                try:
+                    pid = int(rid.split(":", 1)[1])
+                except ValueError:
+                    pid = None
+            title = ((titles.get(pid) if pid is not None else None)
+                     or r.article_url or rid or "—")
+            rows.append({
+                "id": r.id, "brand": r.brand, "title": title,
+                "action_type": r.action_type or "—",
+                "used_style_profile": bool(r.used_style_profile),
+                "llm_usd": round(float(bd.get("llm_usd") or 0), 2),
+                "ahrefs_usd": round(float(bd.get("ahrefs_usd") or 0), 2),
+                "bq_usd": round(float(bd.get("bq_usd") or 0), 2),
+                "other_usd": round(float(bd.get("other_usd") or 0), 2),
+                "total_usd": round(float(r.total_usd or 0), 2),
+                "human_equiv_usd": (round(float(r.human_equiv_usd), 2)
+                                    if may_see_pay and r.human_equiv_usd is not None else None),
+                "savings_usd": (round(float(r.savings_usd), 2)
+                                if may_see_pay and r.savings_usd is not None else None),
+                "article_url": r.article_url,
+                "completed_at": r.completed_at.isoformat() if r.completed_at else None})
+
+        today = date.today()
+        day_rows = (await ctx.session.execute(
+            select(extract("hour", SpendLedger.created_at), SpendLedger.metric,
+                   func.sum(SpendLedger.amount))
+            .where(SpendLedger.window_date == today)
+            .group_by(extract("hour", SpendLedger.created_at), SpendLedger.metric))).all()
+        day_ai = [0.0] * 6
+        for h, m, amt in day_rows:
+            day_ai[min(5, int(h or 0) // 4)] += usd(m, amt)
+        dd = (await ctx.session.execute(
+            select(SpendLedger.window_date, SpendLedger.metric, func.sum(SpendLedger.amount))
+            .where(SpendLedger.window_date >= today - timedelta(days=365))
+            .group_by(SpendLedger.window_date, SpendLedger.metric))).all()
+        daily: dict[Any, float] = {}
+        for d, m, amt in dd:
+            daily[d] = daily.get(d, 0.0) + usd(m, amt)
+        pc_rows = (await ctx.session.execute(
+            select(PipelineCost.completed_at,
+                   func.coalesce(PipelineCost.human_equiv_usd, 0.0))
+            .where(PipelineCost.completed_at
+                   >= datetime.now(timezone.utc) - timedelta(days=366)))).all()
+
+    WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    def human_sum(pred) -> float:
+        if not may_see_pay:
+            return 0.0
+        return sum(float(h or 0) for t, h in pc_rows if t and pred(t))
+
+    day = [{"label": f"{b * 4:02d}", "ai_usd": round(day_ai[b], 2),
+            "human_usd": round(human_sum(
+                lambda t, b=b: t.date() == today and t.hour // 4 == b), 2)}
+           for b in range(6)]
+    week = []
+    for i in range(6, -1, -1):
+        d = today - timedelta(days=i)
+        week.append({"label": WD[d.weekday()], "ai_usd": round(daily.get(d, 0.0), 2),
+                     "human_usd": round(human_sum(lambda t, d=d: t.date() == d), 2)})
+    month = []
+    for w in range(4):
+        start = today - timedelta(days=27 - w * 7)
+        end = start + timedelta(days=6)
+        ai = sum(v for d, v in daily.items() if start <= d <= end)
+        month.append({"label": f"W{w + 1}", "ai_usd": round(ai, 2),
+                      "human_usd": round(human_sum(
+                          lambda t, s=start, e=end: s <= t.date() <= e), 2)})
+    year = []
+    yy, mm = today.year, today.month
+    months = []
+    for i in range(11, -1, -1):
+        m2, y2 = mm - i, yy
+        while m2 <= 0:
+            m2 += 12
+            y2 -= 1
+        months.append((y2, m2))
+    for (y2, m2) in months:
+        ai = sum(v for d, v in daily.items() if d.year == y2 and d.month == m2)
+        year.append({"label": MON[m2 - 1], "ai_usd": round(ai, 2),
+                     "human_usd": round(human_sum(
+                         lambda t, y2=y2, m2=m2: t.year == y2 and t.month == m2), 2)})
+    return {"pipeline_costs": rows,
+            "series": {"day": day, "week": week, "month": month, "year": year},
+            "may_see_pay": may_see_pay}
+
+
+# --- Session trends ---------------------------------------------------------------
+
+_ST_METRIC_MAP = {"visits": "sessions", "averageEngagedDepth": "avd"}
+_WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _session_trend_spa(p: dict[str, Any]) -> dict[str, Any]:
+    """Pivot a stored session_trends payload into the SPA's day-major shape.
+    views/visits have no distinct source → null (SPA renders placeholders)."""
+    from datetime import date as _date
+    metrics = p.get("metrics") or {}
+    visits = metrics.get("visits") or {}
+    avd = metrics.get("averageEngagedDepth") or {}
+    iso = p.get("iso_week") or ""
+    try:
+        week_no = int(str(iso).split("W")[-1])
+    except ValueError:
+        week_no = 0
+    vser = visits.get("series") or []
+    aser = avd.get("series") or []
+    days = []
+    for i in range(7):
+        d_iso = None
+        if i < len(vser):
+            d_iso = (vser[i] or {}).get("date")
+        if d_iso is None and i < len(aser):
+            d_iso = (aser[i] or {}).get("date")
+        try:
+            lbl = _WD[_date.fromisoformat(d_iso).weekday()] if d_iso else _WD[i]
+        except (ValueError, TypeError):
+            lbl = _WD[i]
+        days.append({"d": lbl, "date": d_iso,
+                     "sessions": (vser[i] or {}).get("value") if i < len(vser) else None,
+                     "views": None, "visits": None,
+                     "avd": (aser[i] or {}).get("value") if i < len(aser) else None})
+    thr = float(p.get("threshold_pct") or 25.0)
+
+    def r1(v: Any) -> float | None:
+        return round(float(v), 1) if isinstance(v, (int, float)) else None
+
+    flags = []
+    for f in (p.get("flags") or []):
+        m = _ST_METRIC_MAP.get(f.get("metric"))
+        if not m:
+            continue          # SPA has no key for this metric — drop, don't blank
+        kind = "rise" if f.get("direction") == "up" else "dip"
+        note = (f"Week-over-week {kind} ≥ {thr:g}% threshold" if f.get("kind") == "wow"
+                else f"Day-over-day {kind} on {f.get('date')}")
+        flags.append({"metric": m, "kind": kind,
+                      "delta": r1(f.get("pct")) or 0.0,
+                      "date": f.get("date"), "note": note})
+    return {"brand": p.get("brand"), "iso_week": week_no, "iso_week_label": iso,
+            "week_start": p.get("week_start"), "threshold_pct": thr,
+            "totals": {"sessions": visits.get("weekly"), "views": None, "visits": None,
+                       "avd": r1(avd.get("weekly"))},
+            "wow": {"sessions": r1(visits.get("wow_pct")), "views": None, "visits": None,
+                    "avd": r1(avd.get("wow_pct"))},
+            "series": days, "flags": flags}
+
+
+@router.get("/session-trends")
+async def session_trends_api(request: Request) -> dict[str, Any]:
+    """Latest session-trends week per brand (same store the HTML page reads)."""
+    require_user(request)
+    from ..db.enums import EntryType
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        entries = await ctx.store.query(
+            types=[EntryType.METRIC], payload_contains={"kind": "session_trends"},
+            fresh_within_seconds=90 * 24 * 3600, limit=300)
+    latest: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        p = e.payload or {}
+        b = p.get("brand", e.brand)
+        if b not in latest or (p.get("iso_week") or "") > (latest[b].get("iso_week") or ""):
+            latest[b] = p
+    ordered = [b for b in settings.brand_keys if b in latest]
+    ordered += [b for b in latest if b not in ordered and b != "portfolio"]
+    return {"trends": [_session_trend_spa(latest[b]) for b in ordered]}
+
+
+# --- Agent detail -----------------------------------------------------------------
+
+
+@router.get("/agents/{agent_key}")
+async def agent_detail_api(request: Request, agent_key: str) -> dict[str, Any]:
+    """One agent: overview row (entries recomputed as a real 24h count), 7-day
+    spend spark, its recent events, and pipelines it requested. tokens is
+    always null — no persisted token counts exist."""
+    require_user(request)
+    from datetime import date, datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from .. import pricing
+    from ..db.models import MemoryEntry, SpendLedger
+    async with RunContext.open() as ctx:
+        overview = await routes._agents_overview(ctx)
+        row = next((a for a in overview if a.get("key") == agent_key), None)
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown agent")
+        now = datetime.now(timezone.utc)
+        entries_24h = (await ctx.session.execute(
+            select(func.count()).select_from(MemoryEntry)
+            .where(MemoryEntry.source_agent == agent_key,
+                   MemoryEntry.created_at >= now - timedelta(hours=24)))).scalar_one()
+        rates = await pricing.load_rates(ctx.session)
+        since = date.today() - timedelta(days=6)
+        led = (await ctx.session.execute(
+            select(SpendLedger.window_date, SpendLedger.metric, func.sum(SpendLedger.amount))
+            .where(SpendLedger.agent == agent_key, SpendLedger.window_date >= since)
+            .group_by(SpendLedger.window_date, SpendLedger.metric))).all()
+        by_day: dict[Any, float] = {}
+        for d, m, amt in led:
+            by_day[d] = by_day.get(d, 0.0) + pricing.metric_to_usd(
+                m, amt or 0, bq_tb=rates["bq_tb"], ahrefs_unit=rates["ahrefs_unit"])
+        spark = [round(by_day.get(since + timedelta(days=i), 0.0), 2) for i in range(7)]
+        raw = await routes._activity_events(ctx, 200)
+        events = [e for e in raw if e.get("agent") == agent_key][:30]
+        pipes = await routes.PipelineRepo(ctx.session).list(limit=80)
+        pipelines = [{"id": p.id, "brand": p.brand,
+                      "headline": p.trend.headline if p.trend else f"pipeline #{p.id}",
+                      "status": p.status}
+                     for p in pipes if p.requested_by == agent_key]
+    agent = dict(row)
+    agent["entries"] = int(entries_24h)
+    return {"agent": agent,
+            "cost": {"usd_7d": round(sum(spark), 2), "tokens": None, "spark": spark},
+            "events": events, "pipelines": pipelines}
+
+
+# --- Ledger (published artifacts) --------------------------------------------------
+
+
+def _ledger_channel(job: Any, brand: str) -> dict[str, Any]:
+    settings = get_settings()
+    try:
+        handle = settings.brand(brand).domain
+    except KeyError:
+        handle = brand
+    rr = job.result_ref or {}
+    mode = rr.get("mode") or ""
+    dest = {"emaki_unpublished_draft": "Emaki CMS · unpublished draft",
+            "manual_handoff": "Manual hand-off"}.get(mode, mode or "Manual hand-off")
+    ref = None
+    url = None
+    if mode == "emaki_unpublished_draft" and rr.get("topic_id") is not None:
+        ref = f"topic_{rr['topic_id']}"
+    aref = rr.get("artifact_ref") if isinstance(rr.get("artifact_ref"), dict) else None
+    if aref is None and isinstance(job.preview_ref, dict):
+        aref = job.preview_ref
+    if ref is None and aref:
+        ref = aref.get("key")
+    if aref and aref.get("backend") == "local" and aref.get("key"):
+        url = f"/api/artifact-file/{aref['key']}"
+    micros = (job.cost or {}).get("llm_micros")
+    pub = job.reviewed_at or job.updated_at or job.created_at
+    return {"key": "web", "label": "Website", "handle": handle, "destination": dest,
+            "ref": ref or "—", "url": url,
+            "impressions": None, "engagements": None, "clicks": None,
+            "cost": round(micros / 1e6, 2) if micros else 0.0,
+            "revenue": None,
+            "publishedAt": pub.isoformat() if pub else None}
+
+
+def _ledger_record(job: Any, bench: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    brand = job.pipeline.brand if job.pipeline else "portfolio"
+    meta = job.preview_meta or {}
+    pub = job.reviewed_at or job.updated_at or job.created_at
+    chan = _ledger_channel(job, brand)
+    b = bench.get(brand, {})
+    settings = get_settings()
+    try:
+        disp = settings.brand(brand).display_name
+    except KeyError:
+        disp = brand
+    return {"id": _artifact_id(job.id),
+            "title": _clean_title(meta.get("title"), job.content_type.replace("_", " ")),
+            "brand": brand,
+            "kind": _KIND_LABEL.get(job.content_type, job.content_type),
+            "publishedAt": pub.isoformat() if pub else None,
+            "wordCount": int(meta.get("word_count") or 0),
+            "qualityScore": (meta.get("quality") or {}).get("score"),
+            "channels": [chan],
+            "costs": {"generation": chan["cost"], "factCheck": None,
+                      "editorial": None, "distribution": None},
+            "revenue": {"programmatic": None, "affiliate": None, "subscription": None},
+            "benchmark": {"scope": f"{disp} · published · 30d",
+                          "avgCost": b.get("avgCost"), "avgRevenue": None,
+                          "avgImpressions": None, "avgEngagementRate": None,
+                          "avgCtr": None, "sample": b.get("sample", 0)}}
+
+
+async def _ledger_benchmarks(ctx: RunContext) -> dict[str, dict[str, Any]]:
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select
+
+    from ..db.models import PipelineCost
+    since = datetime.now(timezone.utc) - timedelta(days=30)
+    rows = (await ctx.session.execute(
+        select(PipelineCost.brand, func.count(), func.avg(PipelineCost.total_usd))
+        .where(PipelineCost.completed_at >= since)
+        .group_by(PipelineCost.brand))).all()
+    return {b: {"sample": int(c), "avgCost": round(float(a), 2) if a is not None else None}
+            for b, c, a in rows}
+
+
+@router.get("/ledger")
+async def ledger_list(request: Request, brand: str | None = None) -> dict[str, Any]:
+    """Published artifacts with per-channel results. Revenue/audience metrics
+    have no source yet → null (SPA renders placeholders)."""
+    require_user(request)
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from ..db.models import ContentJob, ContentPipeline
+    async with RunContext.open() as ctx:
+        q = (select(ContentJob).options(selectinload(ContentJob.pipeline))
+             .join(ContentPipeline, ContentPipeline.id == ContentJob.pipeline_id)
+             .where(ContentJob.status == "published")
+             .order_by(ContentJob.reviewed_at.desc().nulls_last(), ContentJob.id.desc())
+             .limit(50))
+        if brand:
+            q = q.where(ContentPipeline.brand == brand)
+        jobs = list((await ctx.session.execute(q)).scalars().all())
+        bench = await _ledger_benchmarks(ctx)
+        records = [_ledger_record(j, bench) for j in jobs]
+    return {"records": records}
+
+
+@router.get("/ledger/{record_id}")
+async def ledger_record_api(request: Request, record_id: str) -> dict[str, Any]:
+    require_user(request)
+    jid = _parse_artifact_id(record_id)
+    if jid is None:
+        raise HTTPException(status_code=404, detail="ledger record not found")
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from ..db.models import ContentJob
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob).options(selectinload(ContentJob.pipeline))
+            .where(ContentJob.id == jid))).scalar_one_or_none()
+        if job is None or job.status != "published":
+            raise HTTPException(status_code=404, detail="ledger record not found")
+        bench = await _ledger_benchmarks(ctx)
+        record = _ledger_record(job, bench)
+    return record
+
+
+# --- Trend + pipeline detail --------------------------------------------------------
+
+
+@router.get("/trends/{trend_id}")
+async def trend_detail_api(request: Request, trend_id: int) -> dict[str, Any]:
+    """One trend with dossier, evidence, fact-gate state, and trigger metadata."""
+    require_user(request)
+    from ..db.enums import EntryType
+    from ..trends.lifecycle import CONTENT_TYPES
+    settings = get_settings()
+    async with RunContext.open() as ctx:
+        trend = await routes.TrendRepo(ctx.session).get(trend_id)
+        if trend is None:
+            raise HTTPException(status_code=404, detail="trend not found")
+        d = routes._trend_dict(trend, with_dossier=True)
+        # Fact-gate state (mirrors the HTML trend-detail block).
+        claims = await ctx.store.query(
+            brand=trend.brand, types=[EntryType.CLAIM],
+            payload_contains={"kind": "trend_key_fact", "trend_id": trend.id},
+            status=None, limit=20)
+        facts = await ctx.store.query(
+            brand=trend.brand, types=[EntryType.FACT], verified=True,
+            payload_contains={"kind": "verified_fact"}, limit=50)
+        statements = {(c.payload or {}).get("statement") for c in claims}
+        verified = [f.payload.get("statement") for f in facts
+                    if f.payload and f.payload.get("statement") in statements]
+        pending = [{"statement": (c.payload or {}).get("statement"), "status": c.status}
+                   for c in claims
+                   if (c.payload or {}).get("statement") not in set(verified)]
+        d["dossier"] = trend.dossier or None      # null (not {}) so the SPA's guards work
+    if not d.get("score_breakdown"):
+        d["score_breakdown"] = None
+    d["verified_facts"] = verified
+    d["claims"] = pending
+    d["semrush"] = None                            # no per-trend keyword metrics exist
+    d["may_approve"] = routes._can_approve(request, d.get("brand", ""))
+    return {"trend": d, "content_types": list(CONTENT_TYPES),
+            "default_types": list(settings.trends.default_content_types),
+            "kill_switch": settings.kill_switch}
+
+
+@router.post("/trends/{trend_id}/trigger")
+async def trend_trigger_api(request: Request, background_tasks: BackgroundTasks,
+                            trend_id: int) -> dict[str, Any]:
+    """Create (and optionally approve) a pipeline for a trend — JSON sibling of
+    the HTML trigger form, same guards in the same order."""
+    user = require_user(request)
+    body = await _json_body(request)
+    picked = body.get("content_types") or None
+    instructions = (body.get("instructions") or "").strip() or None
+    wants_approve = bool(body.get("approve_now"))
+    from ..trends.lifecycle import LifecycleError
+    from ..trends.pipeline import approve_and_start, run_job_sweep
+    async with RunContext.open() as ctx:
+        trend = await routes.TrendRepo(ctx.session).get(trend_id)
+        if trend is None:
+            raise HTTPException(status_code=404, detail="trend not found")
+        if wants_approve and not routes._can_approve(request, trend.brand):
+            raise HTTPException(status_code=403, detail="not permitted for this brand")
+        if trend.status not in ("detected", "dossier_building", "proposed"):
+            raise HTTPException(
+                status_code=400,
+                detail=f"trend is {trend.status} — it can no longer be triggered")
+        repo = routes.PipelineRepo(ctx.session)
+        try:
+            pipeline = await repo.create(
+                trend_id=trend.id, brand=trend.brand,
+                content_types=picked or list(get_settings().trends.default_content_types),
+                requested_by=user["email"], instructions=instructions)
+            trend.status = ("proposed" if trend.status in ("detected", "dossier_building")
+                            else trend.status)
+            pipeline_id = pipeline.id
+            if wants_approve:
+                await approve_and_start(ctx, pipeline_id, user["email"])
+        except LifecycleError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    background_tasks.add_task(run_job_sweep)
+    return {"ok": True, "pipeline_id": pipeline_id, "approved": wants_approve}
+
+
+# Map real content-job lifecycle → the SPA's step vocabulary so the detail
+# screen's status styling works untouched; the raw status rides along.
+_STEP_STATUS = {"queued": "proposed", "generating": "dispatched",
+                "preview_ready": "done", "approved": "done", "published": "done",
+                "failed": "failed", "rejected": "rejected", "cancelled": "rejected"}
+
+
+@router.get("/pipelines/{pipeline_id}")
+async def pipeline_detail_api(request: Request, pipeline_id: int) -> dict[str, Any]:
+    """One content pipeline with its jobs as steps. successRate/tokens are null
+    — no run-history or token counts are persisted."""
+    require_user(request)
+    async with RunContext.open() as ctx:
+        p = await routes.PipelineRepo(ctx.session).get(pipeline_id)
+        if p is None:
+            raise HTTPException(status_code=404, detail="pipeline not found")
+        steps = []
+        for job in sorted(p.jobs or [], key=lambda j: j.id or 0):
+            meta = job.preview_meta or {}
+            dur = 0
+            if job.updated_at and job.created_at:
+                dur = max(0, int((job.updated_at - job.created_at).total_seconds() * 1000))
+            steps.append({"id": str(job.id),
+                          "name": _clean_title(meta.get("title"),
+                                               job.content_type.replace("_", " ")),
+                          "agent": "production",
+                          "system": meta.get("generator") or job.transport,
+                          "status": _STEP_STATUS.get(job.status, "proposed"),
+                          "status_raw": job.status,
+                          "durationMs": dur, "tokens": None})
+        out = {"id": p.id, "brand": p.brand,
+               "name": p.trend.headline if p.trend else f"pipeline #{p.id}",
+               "status": p.status, "ownerAgent": p.requested_by, "successRate": None,
+               "may_approve": routes._can_approve(request, p.brand), "steps": steps}
+    return {"pipeline": out}
