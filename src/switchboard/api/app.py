@@ -14,7 +14,7 @@ from starlette.responses import Response
 
 from ..config import get_settings
 from ..logging_ import get_logger, setup_logging
-from . import auth, routes
+from . import auth, json_api, routes
 
 log = get_logger("api")
 
@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(auth.router)
     app.include_router(routes.router)
+    app.include_router(json_api.router)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:  # no auth

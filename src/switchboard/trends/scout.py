@@ -42,6 +42,14 @@ _SOURCE_ADAPTERS = (TavilyTrendAdapter, NewsApiTrendAdapter, FirecrawlTrendAdapt
                     SemrushTrendAdapter, CompetitorNewsAdapter)
 _MAX_NEW_PROPOSALS_PER_SCAN = 3
 
+# Neighbourhood scoring (§13.19 F2/F3): map a related trend's lifecycle state to a
+# same-topic momentum q∈[-1,1] and to an adjacent-theme decline weight d∈[0,1].
+_STATE_MOMENTUM = {"emerging": 0.0, "rising": 0.6, "peak": 0.2, "declining": -0.6, "dormant": -0.9}
+_STATE_DECLINE = {"declining": 0.6, "dormant": 0.9}
+_SAME_TOPIC_SIM = 0.6      # ≥ this ⇒ the same topic recurring (drives F2 momentum q)
+_ADJACENT_SIM = 0.3        # [this, _SAME_TOPIC_SIM) ⇒ an adjacent theme (drives F3 fatigue)
+_FATIGUE_AGE_DAYS = 3      # an adjacent theme must have trended "a little while" to fatigue
+
 
 def _evidence(item: dict[str, Any]) -> dict[str, Any]:
     """Trim a normalized signal item (see _signals_from_memory) to the
@@ -76,6 +84,9 @@ class TrendScout:
         clusters = detector.cluster_signals(items)
         our_titles = await self._our_titles()
         hc_titles = await self._hc_viral_titles()
+        dr_titles = await self._daily_reporting_titles()
+        neigh = await self._neighborhood_trends(brand)
+        session_mom = await self._session_momentum()
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
@@ -90,11 +101,23 @@ class TrendScout:
             if len(cluster.sources) < cfg.min_sources:
                 continue
             covered = detector.covered_by_titles(cluster, our_titles) if our_titles else None
-            corroborated = bool(hc_titles) and detector.corroborated_by_titles(cluster, hc_titles)
-            if corroborated:
+            # Cross-source corroboration (§13.19): which independent monitoring
+            # systems also landed on this topic. Our own sourcing is the baseline;
+            # HC-Viral + daily-reporting each add confidence.
+            monitors: list[str] = []
+            if hc_titles and detector.corroborated_by_titles(cluster, hc_titles):
+                monitors.append("hc_viral_hits")
+            if dr_titles and detector.corroborated_by_titles(cluster, dr_titles):
+                monitors.append("daily_reporting")
+            if monitors:
                 summary["corroborated"] += 1
+            # Neighbourhood signals (§13.19 F2/F3): same-topic momentum (real
+            # reader-session slope, proxy fallback) + adjacent-theme fatigue.
+            momentum, fatigue = self._cluster_signals(cluster, neigh, session_mom)
             score, breakdown = detector.score_cluster(
-                cluster, watchlist=cfg.watchlist, covered=covered, corroborated=corroborated)
+                cluster, watchlist=cfg.watchlist, covered=covered,
+                corroborating_monitors=monitors,
+                topic_momentum=momentum, theme_fatigue=fatigue)
             trend, created = await self.trends.upsert(
                 brand=brand, cluster_key=cluster.cluster_key(), headline=cluster.headline,
                 score=score, score_breakdown=breakdown,
@@ -102,7 +125,7 @@ class TrendScout:
                 source_count=len(cluster.sources), signal_count=len(cluster.items),
                 covered_by_us=covered,
                 entities={"oems": list(cluster.oem_anchor),
-                          "corroborated_by": ["hc_viral"] if corroborated else []},
+                          "corroborated_by": monitors},
                 evidence=[_evidence(i) for i in cluster.items],
                 ttl_hours=cfg.ttl_hours, dedup_days=cfg.dedup_days,
             )
@@ -202,6 +225,113 @@ class TrendScout:
                     log.info("[scout] hc-viral corroboration fetch failed (%s): %s", brand, exc)
             titles.extend(r.get("title", "") for r in rows if r.get("title"))
         return [t for t in titles if t]
+
+    async def _daily_reporting_titles(self) -> list[str]:
+        """Trend/topic titles Anthony's daily-reporting agent has surfaced — the
+        third corroboration source (§13.19). Read from shared memory, where a
+        feeder exports that agent's findings (kind ``daily_report_trends``). Soft-
+        empty until it's connected, so corroboration degrades to us + HC-Viral."""
+        try:
+            entries = await self.ctx.store.query(
+                brand=PORTFOLIO, types=[EntryType.CONTEXT],
+                payload_contains={"kind": "daily_report_trends"},
+                fresh_within_seconds=48 * 3600, limit=50)
+        except Exception as exc:  # noqa: BLE001 — corroboration is a bonus, never a dependency
+            log.info("[scout] daily-reporting corroboration fetch failed: %s", exc)
+            return []
+        titles: list[str] = []
+        for e in entries:
+            for it in (e.payload or {}).get("items", []):
+                t = it.get("title") or it.get("topic") or it.get("headline")
+                if t:
+                    titles.append(t)
+        return [t for t in titles if t]
+
+    async def _neighborhood_trends(self, brand: str) -> list[dict[str, Any]]:
+        """Precompute recent tracked trends' (tokens, oems, lifecycle state, age)
+        for the per-cluster momentum/fatigue signals (§13.19 F2/F3). Their `state`
+        is set by _update_lifecycle from each trend's activity history, so it's a
+        real read on how a topic has been performing. Soft-empty on any error —
+        these factors are refinements, not hard dependencies."""
+        now = datetime.now(timezone.utc)
+        out: list[dict[str, Any]] = []
+        try:
+            rows = await self.trends.list(brand=brand or None, limit=120)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[scout] neighborhood load failed: %s", exc)
+            return out
+        for t in rows:
+            out.append({
+                "tokens": detector.tokens(t.headline or ""),
+                "oems": tuple((t.entities or {}).get("oems", []) or []),
+                "state": (t.state or "").lower(),
+                "age_days": (now - t.created_at).days if t.created_at else 0,
+            })
+        return out
+
+    def _cluster_signals(self, cluster: Any, neigh: list[dict[str, Any]],
+                         session_mom: dict[str, float]) -> tuple[float | None, float | None]:
+        """(topic_momentum q, theme_fatigue r) for a cluster from its neighbourhood.
+
+        q (F2 — is THIS topic performing?) prefers the REAL per-OEM reader-session
+        slope for the cluster's make(s); it falls back to the best same-topic
+        (sim≥0.6) recurring trend's lifecycle momentum only when we have no session
+        signal. r (F3 — is an adjacent theme tiring?) = max similarity×decline over
+        adjacent (0.3≤sim<0.6), aging, declining themes."""
+        from .sessions import momentum_for_oems
+
+        q: float | None = momentum_for_oems(cluster.oem_anchor, session_mom)  # real sessions first
+        best = 0.0
+        r = 0.0
+        for nb in neigh:
+            sim = detector.topic_similarity(cluster, nb["tokens"], nb["oems"])
+            if sim >= _SAME_TOPIC_SIM:
+                if q is None and sim > best:            # proxy only when no session signal
+                    best, q = sim, _STATE_MOMENTUM.get(nb["state"], 0.0)
+            elif sim >= _ADJACENT_SIM and nb["age_days"] >= _FATIGUE_AGE_DAYS \
+                    and nb["state"] in _STATE_DECLINE:
+                r = max(r, round(sim * _STATE_DECLINE[nb["state"]], 3))
+        return q, (r or None)
+
+    async def _session_momentum(self) -> dict[str, float]:
+        """Per-OEM reader-session momentum from the consum table (last 8 weeks,
+        portfolio-wide): are our articles on a given make trending up or down in
+        sessions? Feeds F2's same-topic performance q with real data (§13.19).
+        Governor-guarded; soft-empty on any failure — a refinement, not a
+        dependency."""
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from .sessions import compute_session_momentum
+
+        try:
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except AdapterUnavailable:
+            return {}
+        brands = [b.short_code for k, b in self.ctx.settings.brands.items() if k != "portfolio"]
+        if not brands:
+            return {}
+        sql = f"""
+            SELECT ArticleTitle AS title, COALESCE(ActSessSentinel, 0) AS sessions,
+                   FORMAT_DATE('%G%V', PubDate) AS week
+            FROM {_CONSUM_TABLE}
+            WHERE Brand IN UNNEST(@brands)
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL 56 DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+              AND ArticleTitle IS NOT NULL AND ArticleTitle != '' AND ContentType != 'Resource'
+        """
+        params = {"brands": brands}
+        try:
+            estimated = await client.estimate_bytes(sql, params)
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=estimated):
+                log.info("[scout] session-momentum skipped — bq_bytes cap")
+                return {}
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[scout] session-momentum query failed: %s", exc)
+            return {}
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "trend_scout")
+        return compute_session_momentum(res.rows)
 
     async def _update_lifecycle(self, brand: str) -> int:
         """Record today's activity for the brand's tracked trends, recompute each

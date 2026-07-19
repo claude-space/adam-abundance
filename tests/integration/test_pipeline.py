@@ -11,9 +11,11 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+from sqlalchemy import delete, select
 
 from switchboard.context import RunContext
 from switchboard.db.enums import EntryType, PlanItemStatus, PlanStatus
+from switchboard.db.models import MemoryEntry, Plan, PlanItem, SpendLedger
 from switchboard.interfaces import EntryDraft
 from switchboard.orchestrator.dispatch import Dispatcher, DispatchError
 from switchboard.orchestrator.plans import ApprovalError, PlanRepo
@@ -29,6 +31,36 @@ async def ctx():
             yield c
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"no reachable Postgres: {exc}")
+
+
+@pytest.fixture(autouse=True)
+async def _scrub_test_rows():
+    """Delete every row this module writes, so the integration suite never
+    pollutes the shared DB — these rows used to surface in the live console
+    feeds (Activity/Notifications) as fake agent activity. Runs after each test;
+    a no-op when Postgres is unreachable (the tests skip themselves)."""
+    yield
+    try:
+        async with RunContext.open() as c:
+            s = c.session
+            # memory: the 'itest' marker rows + the synthetic web_search "y" fact
+            await s.execute(delete(MemoryEntry).where(MemoryEntry.source_system == "itest"))
+            await s.execute(delete(MemoryEntry).where(
+                MemoryEntry.source_agent == "research",
+                MemoryEntry.source_system == "web_search",
+                MemoryEntry.payload["statement"].astext == "y"))
+            # spend charged by the governor test
+            await s.execute(delete(SpendLedger).where(SpendLedger.agent == "test"))
+            # plan(s) from the dispatch test — matched by the item rationale marker
+            plan_ids = (await s.execute(
+                select(PlanItem.plan_id).where(PlanItem.rationale == "integration test"))
+            ).scalars().all()
+            if plan_ids:
+                await s.execute(delete(PlanItem).where(PlanItem.plan_id.in_(plan_ids)))
+                await s.execute(delete(Plan).where(Plan.id.in_(plan_ids)))
+            await s.commit()
+    except Exception:  # noqa: BLE001 — no DB / nothing to scrub
+        pass
 
 
 async def test_memory_roundtrip(ctx):

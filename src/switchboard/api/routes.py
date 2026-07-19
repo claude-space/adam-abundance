@@ -966,6 +966,104 @@ async def session_trends_page(request: Request):
                                        "has_any": bool(latest)})
 
 
+async def gather_writer_emulation(ctx: RunContext, requested_brand: str | None) -> dict[str, Any]:
+    """Per-brand top-writer leaderboard + versioned style profiles (§16.3).
+    Shared by the HTML page and the JSON API (json_api.py) so the two never
+    drift. Pure data — no request/response coupling."""
+    from ..db.models import WriterStats, WriterStyleProfile
+
+    brands = [{"key": k, "label": b.display_name}
+              for k, b in ctx.settings.brands.items() if k != "portfolio"]
+    keys = [b["key"] for b in brands]
+    sel_brand = requested_brand or (keys[0] if keys else "")
+    if keys and sel_brand not in keys:
+        sel_brand = keys[0]
+
+    # newest WriterStats window for the brand → its ranked rows
+    win = (await ctx.session.execute(
+        select(WriterStats.window_start, WriterStats.window_end)
+        .where(WriterStats.brand == sel_brand)
+        .order_by(WriterStats.window_end.desc(), WriterStats.window_start.desc())
+        .limit(1))).first()
+    writers: list[dict[str, Any]] = []
+    window = None
+    if win is not None:
+        rows = (await ctx.session.execute(
+            select(WriterStats)
+            .where(WriterStats.brand == sel_brand,
+                   WriterStats.window_start == win[0], WriterStats.window_end == win[1])
+            .order_by(WriterStats.norm_score.desc(), WriterStats.avg_sessions.desc()))).scalars().all()
+        writers = [{"author": r.author, "article_count": r.article_count,
+                    "avg_sessions": r.avg_sessions, "norm_score": r.norm_score,
+                    "is_top": r.is_top} for r in rows]
+        window = {"start": win[0].isoformat(), "end": win[1].isoformat()}
+    max_norm = max((w["norm_score"] for w in writers), default=0.0)
+
+    profs = (await ctx.session.execute(
+        select(WriterStyleProfile).where(WriterStyleProfile.brand == sel_brand)
+        .order_by(WriterStyleProfile.version.desc()))).scalars().all()
+    profiles = []
+    for p in profs:
+        refs = p.exemplar_refs or {}
+        urls, titles = refs.get("urls") or [], refs.get("titles") or []
+        profiles.append({
+            "id": p.id, "version": p.version, "active": p.active,
+            "created_at": p.created_at.strftime("%Y-%m-%d") if p.created_at else "",
+            "source_authors": p.source_authors or [], "features": p.features or {},
+            "exemplar_count": len(urls),
+            "exemplars": [{"title": t, "url": u} for t, u in zip(titles, urls)]})
+    return {"brands": brands, "sel_brand": sel_brand, "writers": writers,
+            "max_norm": max_norm, "profiles": profiles, "window": window,
+            "top_count": sum(1 for w in writers if w["is_top"])}
+
+
+@router.get("/writer-emulation", response_class=HTMLResponse)
+async def writer_emulation_page(request: Request):
+    """Writer emulation (PRD §16.3): the per-brand top-writer leaderboard
+    (cohort-normalized) plus the versioned style profiles distilled from their
+    work. A style layer only — the human fact-check/outline/QA gates stay
+    mandatory (§13.16)."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    async with RunContext.open() as ctx:
+        data = await gather_writer_emulation(ctx, request.query_params.get("brand"))
+    return templates.TemplateResponse(request, "writer_emulation.html",
+        {"user": user, "may_edit": user.get("role") in ("global_admin", "portfolio_admin"), **data})
+
+
+@router.post("/writer-emulation/activate")
+async def writer_emulation_activate(request: Request):
+    """Set one style-profile version active for its brand (portfolio/global admin
+    only). Mirrors the distiller: deactivate the brand's others, activate this."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/auth/login", status_code=302)
+    if user.get("role") not in ("global_admin", "portfolio_admin"):
+        return RedirectResponse("/writer-emulation", status_code=303)
+    from sqlalchemy import update as _update
+
+    from ..db.models import WriterStyleProfile
+    form = await request.form()
+    try:
+        pid = int(form.get("profile_id"))
+    except (TypeError, ValueError):
+        return RedirectResponse("/writer-emulation", status_code=303)
+    brand = (form.get("brand") or "").strip()
+    async with RunContext.open() as ctx:
+        prof = (await ctx.session.execute(
+            select(WriterStyleProfile).where(WriterStyleProfile.id == pid))).scalar_one_or_none()
+        if prof is not None:
+            brand = prof.brand
+            await ctx.session.execute(
+                _update(WriterStyleProfile)
+                .where(WriterStyleProfile.brand == brand, WriterStyleProfile.active.is_(True))
+                .values(active=False))
+            prof.active = True
+            await ctx.session.flush()
+    return RedirectResponse(f"/writer-emulation?brand={brand}", status_code=303)
+
+
 @router.get("/expenditure", response_class=HTMLResponse)
 async def expenditure_page(request: Request):
     """Expenditure (PRD §16.4): total AI spend priced to USD from the same ledger
