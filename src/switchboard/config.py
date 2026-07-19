@@ -198,6 +198,10 @@ class Settings:
     ttls: dict[str, int | None] = field(default_factory=lambda: dict(_DEFAULT_TTLS))
     endpoints: dict[str, str] = field(default_factory=dict)
     logo_dev_token: str = ""   # logo.dev publishable key (pk_...) for service logos
+    # Built React console (SPA_SHELL=1 build of story-unraveler-tool → dist/client).
+    # When set, the app co-hosts the SPA: every page GET serves the client shell,
+    # /api + /auth stay server-owned. Empty → classic Jinja2 console.
+    spa_dist_dir: str = ""
 
     # -- brands ---------------------------------------------------------------
 
@@ -354,6 +358,7 @@ def get_settings() -> Settings:
         trends=trends,
         endpoints=endpoints,
         logo_dev_token=creds.resolve("LOGO_DEV_TOKEN", secret=False) or "",
+        spa_dist_dir=creds.resolve("SPA_DIST_DIR", secret=False) or "",
     )
     log.info(
         "Settings loaded: env=%s brands=%s dry_run_default=%s kill_switch=%s credentials_present=%s",
