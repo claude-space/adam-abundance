@@ -316,6 +316,9 @@ class AnalyticsAgent(BaseAgent):
         except AdapterUnavailable:
             return 0
         window_days = self._int_cred("WRITER_STATS_WINDOW_DAYS", 90)
+        # Candidate exemplars ordered by RECENCY, not all-time sessions: the site
+        # re-slugs articles, so old viral URLs 404, but recent ones still resolve.
+        # Recent top writers' articles characterize current style just as well.
         sql = f"""
             SELECT Writer AS author, ArticleTitle AS title, URL AS url,
                    COALESCE(ActSessSentinel, 0) AS sessions
@@ -324,7 +327,7 @@ class AnalyticsAgent(BaseAgent):
               AND URL IS NOT NULL AND URL != ''
               AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
               AND PubDate <  CURRENT_DATE('America/New_York')
-            ORDER BY sessions DESC LIMIT 200
+            ORDER BY PubDate DESC LIMIT 200
         """
         params = {"brand": bc.short_code, "authors": top_authors}
         try:
@@ -338,12 +341,14 @@ class AnalyticsAgent(BaseAgent):
             return 0
         await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
 
+        # Over-fetch candidates (a few may still 404) — _scrape_exemplars drops
+        # failures and we only need >=3 to succeed.
         exemplars = style_mod.select_exemplars(
             top_authors,
             [{"author": r.get("author"), "title": r.get("title"), "url": r.get("url"),
               "sessions": r.get("sessions")} for r in res.rows],
-            per_author=self._int_cred("WRITER_STYLE_PER_AUTHOR", 2),
-            cap=self._int_cred("WRITER_STYLE_EXEMPLARS", 8))
+            per_author=self._int_cred("WRITER_STYLE_PER_AUTHOR", 3),
+            cap=self._int_cred("WRITER_STYLE_EXEMPLARS", 14))
         if len(exemplars) < 3:
             return 0
 
@@ -413,6 +418,8 @@ class AnalyticsAgent(BaseAgent):
         except (KeyError, AdapterUnavailable):
             return None
         window_days = self._int_cred("WRITER_STATS_WINDOW_DAYS", 90)
+        # Recent-first: the writer's latest articles still resolve (older ones get
+        # re-slugged → 404). Over-fetch so a few stale URLs don't sink the distill.
         sql = f"""
             SELECT Writer AS author, ArticleTitle AS title, URL AS url,
                    COALESCE(ActSessSentinel, 0) AS sessions
@@ -420,7 +427,7 @@ class AnalyticsAgent(BaseAgent):
             WHERE Brand=@brand AND Writer=@author AND URL IS NOT NULL AND URL != ''
               AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
               AND PubDate <  CURRENT_DATE('America/New_York')
-            ORDER BY sessions DESC LIMIT 60
+            ORDER BY PubDate DESC LIMIT 60
         """
         params = {"brand": bc.short_code, "author": author}
         try:
@@ -436,8 +443,8 @@ class AnalyticsAgent(BaseAgent):
             [author],
             [{"author": r.get("author"), "title": r.get("title"), "url": r.get("url"),
               "sessions": r.get("sessions")} for r in res.rows],
-            per_author=self._int_cred("WRITER_PERSONA_EXEMPLARS", 5),
-            cap=self._int_cred("WRITER_PERSONA_EXEMPLARS", 5))
+            per_author=self._int_cred("WRITER_PERSONA_EXEMPLARS", 10),
+            cap=self._int_cred("WRITER_PERSONA_EXEMPLARS", 10))
         scraped = await self._scrape_exemplars(exemplars)
         if len(scraped) < 2:
             log.info("[analytics] persona distill: only %d exemplars for %s/%s", len(scraped), brand, author)
