@@ -418,6 +418,24 @@ class PricingConfig(Base):
     __table_args__ = (Index("ix_pricing_config_kind_key", "kind", "key"),)
 
 
+class TrendScoreWeight(Base):
+    """Operator-tunable weights for the Trend Score formula (§13.19). Append-only
+    — the latest row per ``key`` wins, so edits keep an audit trail. Empty table
+    ⇒ the detector's built-in defaults apply."""
+
+    __tablename__ = "trend_score_weight"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    key: Mapped[str] = mapped_column(Text, nullable=False)          # e.g. corroboration_max, novelty_max
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(Text)           # editor's email (attribution)
+    effective_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_trend_score_weight_key_effective", "key", "effective_at"),)
+
+
 class WriterPayBaseline(Base):
     """SENSITIVE, access-controlled (PRD §16.4 / §13.16): per-article/word human
     pay rates, used only for the AI-vs-human cost comparison."""
