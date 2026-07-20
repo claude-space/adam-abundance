@@ -554,6 +554,23 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
         .group_by(ToolCallLog.agent)
     )).all()
     errors = {a: int(c) for a, c in err_rows}
+    # Real 7-day tool-call activity per agent → the fleet-card sparkline. Bucket
+    # timestamps by UTC day in Python (ToolCallLog has no date column); idle
+    # agents get an all-zero spark so the card renders a flat "no activity"
+    # baseline rather than a fabricated shape.
+    from datetime import timedelta
+    since = date.today() - timedelta(days=6)
+    since_dt = datetime(since.year, since.month, since.day, tzinfo=timezone.utc)
+    ts_rows = (await ctx.session.execute(
+        select(ToolCallLog.agent, ToolCallLog.created_at)
+        .where(ToolCallLog.created_at >= since_dt)
+    )).all()
+    spark_by_agent: dict[str, dict[Any, int]] = {}
+    for a, ts in ts_rows:
+        if ts is None:
+            continue
+        day = ts.date()
+        spark_by_agent.setdefault(a, {})[day] = spark_by_agent.setdefault(a, {}).get(day, 0) + 1
     out = []
     for m in AGENT_META:
         k = m["key"]
@@ -561,8 +578,11 @@ async def _agents_overview(ctx: RunContext) -> list[dict[str, Any]]:
         if k == "orchestrator":
             actions = ["notify", *actions]
         c, last = calls.get(k, (0, None))
+        day_counts = spark_by_agent.get(k, {})
+        spark = [day_counts.get(since + timedelta(days=i), 0) for i in range(7)]
         out.append({**m, "owns": owned_tool_names(k), "actions": actions, "read_only": not actions,
                     "entries": mem.get(k, 0), "calls": c, "errors": errors.get(k, 0),
+                    "spark": spark,
                     "last_active": last.strftime("%m-%d %H:%M") if last else None})
     return out
 
