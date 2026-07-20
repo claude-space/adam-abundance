@@ -142,7 +142,8 @@ class AnalyticsAgent(BaseAgent):
             return 0
         sql = f"""
             SELECT Writer AS author, PriCat AS category, Intent AS intent,
-                   COALESCE(ActSessSentinel, 0) AS sessions
+                   COALESCE(ActSessSentinel, 0) AS sessions,
+                   WriterCost AS cost, WordCount AS words
             FROM {_CONSUM_TABLE}
             WHERE Brand=@brand AND Writer IS NOT NULL AND Writer != ''
               AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
@@ -162,7 +163,8 @@ class AnalyticsAgent(BaseAgent):
 
         ranked = normalize_writers(
             [{"author": r.get("author"), "category": r.get("category"),
-              "intent": r.get("intent"), "sessions": r.get("sessions")} for r in res.rows],
+              "intent": r.get("intent"), "sessions": r.get("sessions"),
+              "cost": r.get("cost"), "words": r.get("words")} for r in res.rows],
             min_articles=min_articles, top_n=top_n)
 
         win_end = date.today()
@@ -174,7 +176,8 @@ class AnalyticsAgent(BaseAgent):
             self.ctx.session.add(WriterStats(
                 brand=brand, author=w["author"], window_start=win_start, window_end=win_end,
                 article_count=w["article_count"], avg_sessions=w["avg_sessions"],
-                norm_score=w["norm_score"], is_top=w["is_top"]))
+                norm_score=w["norm_score"], is_top=w["is_top"],
+                usd_per_article=w.get("usd_per_article"), usd_per_word=w.get("usd_per_word")))
         await self.ctx.session.flush()
 
         await self.ctx.store.write(EntryDraft(
@@ -308,6 +311,89 @@ class AnalyticsAgent(BaseAgent):
             confidence=0.85, ttl_seconds=30 * 24 * 3600))
         log.info("[analytics] style_profile v%d for %s from %d exemplars", next_version, brand, len(scraped))
         return 1
+
+    async def distill_writer_persona(self, brand: str, author: str) -> int | None:
+        """Distil a per-writer persona (§16.3) from ONE real writer's best recent
+        articles: scrape their top exemplars, extract style features via the LLM,
+        and upsert a WriterPersona(kind='writer'). Returns the persona id, or None
+        if it couldn't be built (BQ down, too few exemplars scraped, LLM off).
+        Reuses the same scrape+extract path as the aggregate house profile."""
+        from datetime import datetime, timezone
+        from sqlalchemy import select as _select
+
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from ..adapters.clients.llm import LLMClient
+        from ..db.models import WriterPersona
+        from .. import style as style_mod
+
+        try:
+            bc = self.ctx.settings.brand(brand)
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except (KeyError, AdapterUnavailable):
+            return None
+        window_days = self._int_cred("WRITER_STATS_WINDOW_DAYS", 90)
+        sql = f"""
+            SELECT Writer AS author, ArticleTitle AS title, URL AS url,
+                   COALESCE(ActSessSentinel, 0) AS sessions
+            FROM {_CONSUM_TABLE}
+            WHERE Brand=@brand AND Writer=@author AND URL IS NOT NULL AND URL != ''
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+            ORDER BY sessions DESC LIMIT 60
+        """
+        params = {"brand": bc.short_code, "author": author}
+        try:
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=await client.estimate_bytes(sql, params)):
+                return None
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[analytics] persona distill query failed for %s/%s: %s", brand, author, exc)
+            return None
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+        exemplars = style_mod.select_exemplars(
+            [author],
+            [{"author": r.get("author"), "title": r.get("title"), "url": r.get("url"),
+              "sessions": r.get("sessions")} for r in res.rows],
+            per_author=self._int_cred("WRITER_PERSONA_EXEMPLARS", 5),
+            cap=self._int_cred("WRITER_PERSONA_EXEMPLARS", 5))
+        scraped = await self._scrape_exemplars(exemplars)
+        if len(scraped) < 2:
+            log.info("[analytics] persona distill: only %d exemplars for %s/%s", len(scraped), brand, author)
+            return None
+        try:
+            result = await LLMClient(self.ctx).complete(
+                system=style_mod.STYLE_SYSTEM,
+                prompt=style_mod.build_distill_prompt(brand, scraped,
+                                                      max_chars=self._int_cred("WRITER_STYLE_MAX_CHARS", 2500)),
+                model=self.ctx.settings.models.default, max_tokens=1200, agent="analytics")
+        except AdapterUnavailable:
+            return None
+        features = style_mod.parse_style_features(result.text)
+        if not features or not any(features.values()):
+            return None
+
+        refs = {"urls": [e["url"] for e in scraped], "titles": [e["title"] for e in scraped]}
+        existing = (await self.ctx.session.execute(
+            _select(WriterPersona).where(WriterPersona.brand == brand,
+                                         WriterPersona.kind == "writer",
+                                         WriterPersona.name == author))).scalar_one_or_none()
+        if existing is None:
+            p = WriterPersona(brand=brand, kind="writer", name=author, author=author,
+                              features=features, exemplar_refs=refs, enabled=True)
+            self.ctx.session.add(p)
+            await self.ctx.session.flush()
+            pid = p.id
+        else:
+            existing.features = features
+            existing.exemplar_refs = refs
+            existing.updated_at = datetime.now(timezone.utc)
+            await self.ctx.session.flush()
+            pid = existing.id
+        log.info("[analytics] writer persona for %s/%s (id=%s, %d exemplars)", brand, author, pid, len(scraped))
+        return pid
 
     async def _scrape_exemplars(self, exemplars: list[dict]) -> list[dict]:
         """Fetch + extract article body text for each exemplar URL (trafilatura).

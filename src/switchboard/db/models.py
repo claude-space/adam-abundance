@@ -286,6 +286,7 @@ class ContentJob(Base):
     external_ref: Mapped[dict | None] = mapped_column(JSONB)  # e.g. {"hc_viral_topic_id": 42}
     result_ref: Mapped[dict | None] = mapped_column(JSONB)   # publish outcome
     cost: Mapped[dict | None] = mapped_column(JSONB)         # {llm_micros, usd}
+    persona_id: Mapped[int | None] = mapped_column(BigInteger)  # writer_persona used to generate (§16.3)
     error: Mapped[str | None] = mapped_column(Text)
     reviewed_by: Mapped[str | None] = mapped_column(Text)    # approve/reject attribution
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -373,6 +374,8 @@ class WriterStats(Base):
     avg_sessions: Mapped[float] = mapped_column(Float, nullable=False)      # raw avg sessions/article
     norm_score: Mapped[float] = mapped_column(Float, nullable=False)        # cohort-normalized (see writers.py)
     is_top: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    usd_per_article: Mapped[float | None] = mapped_column(Float)            # real avg WriterCost/article (§16.3)
+    usd_per_word: Mapped[float | None] = mapped_column(Float)               # derived per-word rate
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -399,6 +402,36 @@ class WriterStyleProfile(Base):
     )
 
     __table_args__ = (Index("uq_writer_style_profile_version", "brand", "version", unique=True),)
+
+
+class WriterPersona(Base):
+    """A selectable writer-replication voice for the AI writer (§16.3). Two kinds:
+    ``writer`` (distilled from one real top writer's article corpus) and ``house``
+    (an operator-defined named style brief). Generation rotates through the
+    ``enabled`` personas of a brand round-robin, or a specific one is picked at
+    trigger time. Style layer only — never a byline; the fact-gate/QA stays."""
+
+    __tablename__ = "writer_persona"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)            # writer | house
+    name: Mapped[str] = mapped_column(Text, nullable=False)            # display label (writer name / house style name)
+    author: Mapped[str | None] = mapped_column(Text)                  # source writer (kind=writer)
+    features: Mapped[dict | None] = mapped_column(JSONB)              # distilled style features (same shape as WriterStyleProfile)
+    style_brief: Mapped[str | None] = mapped_column(Text)             # freeform brief (kind=house)
+    exemplar_refs: Mapped[dict | None] = mapped_column(JSONB)         # source article pointers (kind=writer)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    created_by: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_writer_persona_brand_enabled", "brand", "enabled"),
+        Index("uq_writer_persona_brand_kind_name", "brand", "kind", "name", unique=True),
+    )
 
 
 class PricingConfig(Base):

@@ -174,11 +174,25 @@ async def _gen_llm(ctx: RunContext, job: ContentJob, brief: str) -> GenerationRe
     brand = job.pipeline.brand if job.pipeline else "portfolio"
     system = _LLM_SYSTEM.format(brand=brand)
 
-    # Writer-emulation style layer (§16.3): fold the brand's active style profile
-    # into the system prompt. No-op — byte-for-byte the old prompt — until a
-    # profile has been distilled, so this is safe to ship before writers connect.
-    profile = await _active_style_profile(ctx, brand)
-    guide = style_module.style_guide_text(profile.features if profile else None)
+    # Writer-emulation style layer (§16.3). Priority: the persona chosen for this
+    # job (a per-writer or house voice, manual or rotated) → else the brand's
+    # aggregate active style profile → else nothing (byte-for-byte the old prompt).
+    guide = ""
+    meta_style: dict[str, Any] = {}
+    persona = None
+    if job.persona_id is not None:
+        from . import personas
+        persona = await personas.get_persona(ctx.session, job.persona_id)
+    if persona is not None:
+        guide = personas.persona_style_text(persona)
+        if guide:
+            meta_style = {"persona_id": persona.id, "persona_name": persona.name,
+                          "persona_kind": persona.kind}
+    if not guide:
+        profile = await _active_style_profile(ctx, brand)
+        guide = style_module.style_guide_text(profile.features if profile else None)
+        if guide and profile is not None:
+            meta_style = {"style_profile_id": profile.id, "style_profile_version": profile.version}
     if guide:
         system = f"{system}\n\n{guide}"
 
@@ -191,10 +205,7 @@ async def _gen_llm(ctx: RunContext, job: ContentJob, brief: str) -> GenerationRe
         return GenerationResult(ok=False, error="LLM returned an empty draft")
     meta: dict[str, Any] = {"title": _first_heading(text), "word_count": len(text.split()),
                             "generator": "switchboard-llm", "model": ctx.settings.models.default,
-                            "used_style_profile": bool(guide)}
-    if guide and profile is not None:
-        meta["style_profile_id"] = profile.id
-        meta["style_profile_version"] = profile.version
+                            "used_style_profile": bool(guide), **meta_style}
     return GenerationResult(ok=True, preview_markdown=text, preview_meta=meta,
                             cost_micros=result.micros)
 

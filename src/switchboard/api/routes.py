@@ -1015,7 +1015,9 @@ async def gather_writer_emulation(ctx: RunContext, requested_brand: str | None) 
             .order_by(WriterStats.norm_score.desc(), WriterStats.avg_sessions.desc()))).scalars().all()
         writers = [{"author": r.author, "article_count": r.article_count,
                     "avg_sessions": r.avg_sessions, "norm_score": r.norm_score,
-                    "is_top": r.is_top} for r in rows]
+                    "is_top": r.is_top,
+                    "usd_per_article": r.usd_per_article, "usd_per_word": r.usd_per_word}
+                   for r in rows]
         window = {"start": win[0].isoformat(), "end": win[1].isoformat()}
     max_norm = max((w["norm_score"] for w in writers), default=0.0)
 
@@ -1032,8 +1034,20 @@ async def gather_writer_emulation(ctx: RunContext, requested_brand: str | None) 
             "source_authors": p.source_authors or [], "features": p.features or {},
             "exemplar_count": len(urls),
             "exemplars": [{"title": t, "url": u} for t, u in zip(titles, urls)]})
+    # Writer-replication personas (§16.3) for this brand — the selectable voices.
+    from ..db.models import WriterPersona
+    prows = (await ctx.session.execute(
+        select(WriterPersona).where(WriterPersona.brand == sel_brand)
+        .order_by(WriterPersona.kind, WriterPersona.name))).scalars().all()
+    personas = [{
+        "id": p.id, "kind": p.kind, "name": p.name, "author": p.author,
+        "enabled": p.enabled, "has_features": bool(p.features),
+        "style_brief": p.style_brief,
+        "created_at": p.created_at.strftime("%Y-%m-%d") if p.created_at else ""}
+        for p in prows]
     return {"brands": brands, "sel_brand": sel_brand, "writers": writers,
             "max_norm": max_norm, "profiles": profiles, "window": window,
+            "personas": personas,
             "top_count": sum(1 for w in writers if w["is_top"])}
 
 

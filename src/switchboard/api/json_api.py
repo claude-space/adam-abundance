@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 
 from ..config import get_settings
 from ..context import RunContext
@@ -68,6 +69,85 @@ async def writers_activate(request: Request) -> dict[str, Any]:
         await ctx.session.flush()
         brand, version = prof.brand, prof.version
     return {"ok": True, "brand": brand, "active_version": version}
+
+
+@router.get("/personas")
+async def personas_list(request: Request, brand: str | None = None) -> dict[str, Any]:
+    """Writer-replication personas for a brand (§16.3) — used by the trigger
+    screen's picker and the Writer Emulation manager."""
+    u = require_user(request)
+    from ..trends import personas as P
+    settings = get_settings()
+    b = brand or (list(settings.brand_keys)[0] if settings.brand_keys else "")
+    async with RunContext.open() as ctx:
+        rows = await P.list_personas(ctx.session, b)
+    return {"brand": b,
+            "personas": [{"id": p.id, "kind": p.kind, "name": p.name, "author": p.author,
+                          "enabled": p.enabled, "has_features": bool(p.features),
+                          "style_brief": p.style_brief} for p in rows],
+            "may_edit": u.get("role") in ("global_admin", "portfolio_admin")}
+
+
+@router.post("/personas/house")
+async def personas_create_house(request: Request) -> dict[str, Any]:
+    """Create a named house-style persona from a freeform style brief (admin)."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    body = await _json_body(request)
+    brand = (body.get("brand") or "").strip()
+    name = (body.get("name") or "").strip()
+    brief = (body.get("style_brief") or "").strip()
+    if not (brand and name and brief):
+        raise HTTPException(status_code=400, detail="brand, name and style_brief are required")
+    settings = get_settings()
+    if brand not in settings.brand_keys:
+        raise HTTPException(status_code=400, detail=f"unknown brand '{brand}'")
+    from ..trends import personas as P
+    async with RunContext.open() as ctx:
+        try:
+            p = await P.create_house_persona(ctx.session, brand, name,
+                                             style_brief=brief, created_by=u.get("email"))
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail=f"a house persona named '{name}' already exists")
+        return {"ok": True, "id": p.id, "name": p.name}
+
+
+@router.post("/personas/distill")
+async def personas_distill(request: Request) -> dict[str, Any]:
+    """Distil a per-writer persona from a real top writer's corpus (admin). This
+    scrapes + runs the LLM, so it can take a few seconds."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    body = await _json_body(request)
+    brand = (body.get("brand") or "").strip()
+    author = (body.get("author") or "").strip()
+    if not (brand and author):
+        raise HTTPException(status_code=400, detail="brand and author are required")
+    from ..agents.analytics import AnalyticsAgent
+    async with RunContext.open() as ctx:
+        pid = await AnalyticsAgent(ctx).distill_writer_persona(brand, author)
+    if pid is None:
+        raise HTTPException(status_code=502,
+                            detail="couldn't distil this writer (not enough scrapable articles, or BigQuery/LLM unavailable)")
+    return {"ok": True, "id": pid, "author": author}
+
+
+@router.post("/personas/{persona_id}/enable")
+async def personas_set_enabled(request: Request, persona_id: int) -> dict[str, Any]:
+    """Toggle whether a persona is in the auto-rotation pool (admin)."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    body = await _json_body(request)
+    enabled = bool(body.get("enabled", True))
+    from ..trends import personas as P
+    async with RunContext.open() as ctx:
+        p = await P.set_enabled(ctx.session, persona_id, enabled)
+        if p is None:
+            raise HTTPException(status_code=404, detail="persona not found")
+        return {"ok": True, "id": p.id, "enabled": p.enabled}
 
 
 @router.get("/dashboard")
@@ -235,6 +315,8 @@ async def pipeline_approve(request: Request, background_tasks: BackgroundTasks,
     body = await _json_body(request)
     picked = body.get("content_types") or None
     instructions = (body.get("instructions") or "").strip() or None
+    persona_id = body.get("persona_id")   # None → auto-rotate
+    persona_id = int(persona_id) if persona_id not in (None, "", "auto") else None
     from ..trends.lifecycle import LifecycleError
     from ..trends.pipeline import approve_and_start, run_job_sweep
     async with RunContext.open() as ctx:
@@ -245,7 +327,8 @@ async def pipeline_approve(request: Request, background_tasks: BackgroundTasks,
             raise HTTPException(status_code=403, detail="not permitted for this brand")
         try:
             await approve_and_start(ctx, pipeline_id, user["email"],
-                                    content_types=picked, instructions=instructions)
+                                    content_types=picked, instructions=instructions,
+                                    persona_id=persona_id)
         except LifecycleError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     background_tasks.add_task(run_job_sweep)
@@ -1565,6 +1648,8 @@ async def trend_trigger_api(request: Request, background_tasks: BackgroundTasks,
     picked = body.get("content_types") or None
     instructions = (body.get("instructions") or "").strip() or None
     wants_approve = bool(body.get("approve_now"))
+    persona_id = body.get("persona_id")   # None → auto-rotate at approval
+    persona_id = int(persona_id) if persona_id not in (None, "", "auto") else None
     from ..trends.lifecycle import LifecycleError
     from ..trends.pipeline import approve_and_start, run_job_sweep
     async with RunContext.open() as ctx:
@@ -1587,7 +1672,7 @@ async def trend_trigger_api(request: Request, background_tasks: BackgroundTasks,
                             else trend.status)
             pipeline_id = pipeline.id
             if wants_approve:
-                await approve_and_start(ctx, pipeline_id, user["email"])
+                await approve_and_start(ctx, pipeline_id, user["email"], persona_id=persona_id)
         except LifecycleError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
     background_tasks.add_task(run_job_sweep)
