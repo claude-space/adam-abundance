@@ -667,11 +667,16 @@ def _image_query(trend: Any, title: str) -> str:
 
 
 @router.get("/artifacts/{artifact_id}/image-candidates")
-async def artifact_image_candidates(request: Request, artifact_id: str, q: str | None = None) -> dict[str, Any]:
+async def artifact_image_candidates(request: Request, artifact_id: str,
+                                    q: str | None = None, refresh: bool = False) -> dict[str, Any]:
     """Hero-image candidates for an artifact — the brand media library + Unsplash
-    + Pexels, searched by ``q`` (defaults to the trend's topic). Sources with no
-    key/config are skipped; `sources` reports each one's state so the UI can
-    explain an empty result."""
+    + Pexels, searched by ``q`` (defaults to the trend's topic).
+
+    Cached per artifact on ``preview_meta`` so a page reload reuses the same set
+    (no repeat stock-API calls / rate-limit burn). The cache is reused only while
+    the query matches; a new search fetches fresh, and ``refresh=1`` forces a new
+    fetch (the picker's Refresh button). Sources with no key are skipped; the
+    `sources` map reports each one's state."""
     require_user(request)
     job_id = _parse_artifact_id(artifact_id)
     if job_id is None:
@@ -691,8 +696,30 @@ async def artifact_image_candidates(request: Request, artifact_id: str, q: str |
         trend = job.pipeline.trend if job.pipeline else None
         title = (job.preview_meta or {}).get("title") or f"artifact {artifact_id}"
         query = (q or "").strip() or _image_query(trend, title)
-        result = await image_candidates(ctx.creds, query)
-    return result
+
+        cache = (job.preview_meta or {}).get("image_candidates")
+        same_query = isinstance(cache, dict) and cache.get("query") == query
+        if not refresh and same_query and cache.get("candidates"):
+            return {"query": query, "candidates": cache["candidates"],
+                    "sources": cache.get("sources", {}), "cached": True}
+
+        # Refresh advances the result page (cycling 1→5) to pull a genuinely
+        # different set; a new query starts back at page 1.
+        page = 1
+        if refresh and same_query:
+            page = (int(cache.get("page", 1)) % 5) + 1
+        result = await image_candidates(ctx.creds, query, page=page)
+        # Cache only a non-empty fetch — so a transient/keyless empty result
+        # doesn't get pinned (a later load re-tries and picks up new keys).
+        if result.get("candidates"):
+            meta = dict(job.preview_meta or {})
+            meta["image_candidates"] = {"query": result["query"],
+                                        "candidates": result["candidates"],
+                                        "sources": result["sources"],
+                                        "page": result.get("page", page)}
+            job.preview_meta = meta
+            await ctx.session.flush()
+    return {**result, "cached": False}
 
 
 @router.post("/artifacts/{artifact_id}/hero-image")

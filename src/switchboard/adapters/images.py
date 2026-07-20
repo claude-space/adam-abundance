@@ -22,11 +22,11 @@ log = get_logger("adapters.images")
 _UA = {"User-Agent": "Switchboard/1.0 (+editorial preview)"}
 
 
-async def _unsplash(query: str, key: str, limit: int) -> list[dict[str, Any]]:
+async def _unsplash(query: str, key: str, limit: int, page: int) -> list[dict[str, Any]]:
     import httpx  # type: ignore
     async with httpx.AsyncClient(timeout=15.0, headers={**_UA, "Authorization": f"Client-ID {key}"}) as c:
         r = await c.get("https://api.unsplash.com/search/photos",
-                        params={"query": query, "per_page": limit, "orientation": "landscape"})
+                        params={"query": query, "per_page": limit, "page": page, "orientation": "landscape"})
         r.raise_for_status()
         out = []
         for p in (r.json().get("results") or [])[:limit]:
@@ -44,11 +44,11 @@ async def _unsplash(query: str, key: str, limit: int) -> list[dict[str, Any]]:
         return [x for x in out if x["thumb_url"] and x["full_url"]]
 
 
-async def _pexels(query: str, key: str, limit: int) -> list[dict[str, Any]]:
+async def _pexels(query: str, key: str, limit: int, page: int) -> list[dict[str, Any]]:
     import httpx  # type: ignore
     async with httpx.AsyncClient(timeout=15.0, headers={**_UA, "Authorization": key}) as c:
         r = await c.get("https://api.pexels.com/v1/search",
-                        params={"query": query, "per_page": limit, "orientation": "landscape"})
+                        params={"query": query, "per_page": limit, "page": page, "orientation": "landscape"})
         r.raise_for_status()
         out = []
         for p in (r.json().get("photos") or [])[:limit]:
@@ -106,12 +106,14 @@ def _s3_media(creds: Any, limit: int) -> list[dict[str, Any]]:
         return []
 
 
-async def image_candidates(creds: Any, query: str, *, per_source: int = 6) -> dict[str, Any]:
+async def image_candidates(creds: Any, query: str, *, per_source: int = 6, page: int = 1) -> dict[str, Any]:
     """Merge candidates from the media library + Unsplash + Pexels for ``query``.
-    Each source is independent and soft-fails to [] (missing key, network, etc.),
-    so the picker shows whatever is available. Returns configured-source flags so
-    the UI can explain an empty result."""
+    ``page`` selects the result page from the stock sources — the Refresh button
+    advances it to pull a genuinely different set (both APIs rank deterministically,
+    so re-querying page 1 returns the same photos). Each source soft-fails to []
+    (missing key, network, etc.); `sources` reports each one's state."""
     query = (query or "").strip() or "automotive"
+    page = max(1, int(page or 1))
     candidates: list[dict[str, Any]] = []
     sources: dict[str, str] = {}
 
@@ -121,7 +123,7 @@ async def image_candidates(creds: Any, query: str, *, per_source: int = 6) -> di
     unsplash_key = creds.resolve("UNSPLASH_ACCESS_KEY")
     if unsplash_key:
         try:
-            candidates += await _unsplash(query, unsplash_key, per_source)
+            candidates += await _unsplash(query, unsplash_key, per_source, page)
             sources["unsplash"] = "on"
         except Exception as exc:  # noqa: BLE001
             log.info("[images] unsplash search failed: %s", exc)
@@ -132,7 +134,7 @@ async def image_candidates(creds: Any, query: str, *, per_source: int = 6) -> di
     pexels_key = creds.resolve("PEXELS_API_KEY")
     if pexels_key:
         try:
-            candidates += await _pexels(query, pexels_key, per_source)
+            candidates += await _pexels(query, pexels_key, per_source, page)
             sources["pexels"] = "on"
         except Exception as exc:  # noqa: BLE001
             log.info("[images] pexels search failed: %s", exc)
@@ -140,4 +142,4 @@ async def image_candidates(creds: Any, query: str, *, per_source: int = 6) -> di
     else:
         sources["pexels"] = "unconfigured"
 
-    return {"query": query, "candidates": candidates, "sources": sources}
+    return {"query": query, "candidates": candidates, "sources": sources, "page": page}
