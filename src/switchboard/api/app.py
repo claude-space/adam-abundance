@@ -106,7 +106,10 @@ def create_app() -> FastAPI:
 
         log.info("SPA co-hosting enabled: serving %s", spa_dir)
 
-    app.add_middleware(SessionMiddleware, secret_key=settings.creds.session_secret(), https_only=False)
+    # Secure (HTTPS-only) session cookie everywhere except local dev — prod is
+    # always behind TLS (Cloudflare/Caddy), so the cookie should never ride http.
+    app.add_middleware(SessionMiddleware, secret_key=settings.creds.session_secret(),
+                       https_only=settings.env != "local")
     app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(auth.router)
     app.include_router(routes.router)
