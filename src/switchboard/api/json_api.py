@@ -413,7 +413,7 @@ def _artifact_row(job: Any) -> dict[str, Any]:
 
 
 def _md_to_draft(md: str, *, title: str, brand: str, kind: str, generated: str,
-                 artifact_id: str) -> dict[str, Any]:
+                 artifact_id: str, hero_image: dict[str, Any] | None = None) -> dict[str, Any]:
     """Parse a real markdown draft into the magazine-layout fields the website
     preview renders (dropcap lede → body → pull-quote → body). Keeps the exact
     Lovable layout, populated with the artifact's real text."""
@@ -489,6 +489,12 @@ def _md_to_draft(md: str, *, title: str, brand: str, kind: str, generated: str,
         "domain": f"{brand}.com",
         "slug": f"drafts/{artifact_id.lower()}",
         "heroGradient": "linear-gradient(135deg,#1a1a1a,#3a3a3a)",
+        # Operator-chosen hero image (via the picker) — full URL + attribution;
+        # None until one is selected, so the preview falls back to the gradient.
+        "heroImage": (hero_image or {}).get("url"),
+        "heroCredit": (hero_image or {}).get("credit"),
+        "heroCreditUrl": (hero_image or {}).get("credit_url"),
+        "heroSource": (hero_image or {}).get("source"),
         "heroBadge": f"{len((md or '').split())} words",
         "dropcap": (lede[:1] or "T").upper(),
         "lede": lede[1:] if lede else "",
@@ -633,13 +639,96 @@ async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
             "cost": job.cost,
             "note": quality.get("note"),
             "article": _md_to_draft(body, title=row["title"], brand=brand,
-                                    kind=job.content_type, generated=generated, artifact_id=row["id"]),
+                                    kind=job.content_type, generated=generated, artifact_id=row["id"],
+                                    hero_image=(job.preview_meta or {}).get("hero_image")),
             "breakdown": _breakdown_rows(breakdown),
             "signals": _artifact_signals(breakdown, scoring.fact_gate(trend)),
             "timeline": _artifact_timeline(job, row),
             "may_approve": routes._can_approve(request, brand),
         }
     return detail
+
+
+def _image_query(trend: Any, title: str) -> str:
+    """A short, image-search-friendly query for an artifact: the trend's OEM
+    anchor + a couple of headline words, else the title. Stock APIs match short
+    concrete phrases best."""
+    if trend is not None:
+        oems = ((trend.entities or {}).get("oems") if getattr(trend, "entities", None) else None) or []
+        head = (trend.headline or "").strip()
+        if head:
+            # Drop a trailing "… recall/recalls …" clause for a cleaner image query.
+            q = head.split(" recall")[0].strip() or head
+            # Prepend the OEM only if the headline doesn't already name it.
+            if oems and oems[0].lower() not in q.lower():
+                q = f"{oems[0]} {q}"
+            return q[:60]
+    return (title or "automotive").strip()[:60]
+
+
+@router.get("/artifacts/{artifact_id}/image-candidates")
+async def artifact_image_candidates(request: Request, artifact_id: str, q: str | None = None) -> dict[str, Any]:
+    """Hero-image candidates for an artifact — the brand media library + Unsplash
+    + Pexels, searched by ``q`` (defaults to the trend's topic). Sources with no
+    key/config are skipped; `sources` reports each one's state so the UI can
+    explain an empty result."""
+    require_user(request)
+    job_id = _parse_artifact_id(artifact_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from ..adapters.images import image_candidates
+    from ..db.models import ContentJob, ContentPipeline
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob)
+            .options(selectinload(ContentJob.pipeline).selectinload(ContentPipeline.trend))
+            .where(ContentJob.id == job_id))).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        trend = job.pipeline.trend if job.pipeline else None
+        title = (job.preview_meta or {}).get("title") or f"artifact {artifact_id}"
+        query = (q or "").strip() or _image_query(trend, title)
+        result = await image_candidates(ctx.creds, query)
+    return result
+
+
+@router.post("/artifacts/{artifact_id}/hero-image")
+async def artifact_set_hero_image(request: Request) -> dict[str, Any]:
+    """Persist (or clear) the artifact's chosen hero image. Body: {url, credit,
+    credit_url, source} — or {url: null} to clear. Stored on preview_meta so the
+    review preview and any downstream publish read the same selection."""
+    u = require_user(request)
+    artifact_id = request.path_params["artifact_id"]
+    job_id = _parse_artifact_id(artifact_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    body = await _json_body(request)
+    from sqlalchemy import select
+
+    from ..db.models import ContentJob
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob).where(ContentJob.id == job_id))).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        meta = dict(job.preview_meta or {})
+        url = body.get("url")
+        if url:
+            meta["hero_image"] = {
+                "url": str(url),
+                "credit": (body.get("credit") or None),
+                "credit_url": (body.get("credit_url") or None),
+                "source": (body.get("source") or None),
+                "chosen_by": u.get("email"),
+            }
+        else:
+            meta.pop("hero_image", None)
+        job.preview_meta = meta          # reassign so SQLAlchemy flags the JSONB dirty
+        await ctx.session.flush()
+    return {"ok": True, "hero_image": meta.get("hero_image")}
 
 
 # --- Distribution (§6.6 outbound artifacts) -----------------------------------
