@@ -175,6 +175,34 @@ async def pipelines(request: Request, brand: str | None = None,
     return {"pipelines": pipelines, "counts": counts}
 
 
+@router.post("/cycle")
+async def run_cycle(request: Request) -> dict[str, Any]:
+    """Run the morning cycle (observe → plan) for one brand or all — the JSON
+    sibling of the HTML /cycle form. Human-initiated; planning is dry-run by
+    default and nothing dispatches without approval."""
+    require_user(request)
+    body = await _json_body(request)
+    brand = (body.get("brand") or "all").strip() or "all"
+    settings = get_settings()
+    if brand != "all" and brand not in settings.brand_keys:
+        raise HTTPException(status_code=400, detail=f"unknown brand '{brand}'")
+    from datetime import date
+
+    from ..orchestrator import run_morning_cycle
+    from ..orchestrator.plans import PlanRepo
+    brands = list(settings.brand_keys) if brand == "all" else [brand]
+    for b in brands:
+        await run_morning_cycle(b)
+    plans = []
+    async with RunContext.open() as ctx:
+        repo = PlanRepo(ctx.session)
+        for b in brands:
+            latest = await repo.latest_plan(b, date.today())
+            if latest is not None:
+                plans.append({"brand": b, "plan_id": latest.id})
+    return {"ok": True, "plans": plans}
+
+
 # --- Trend Radar actions (JSON siblings of the HTML form routes) --------------
 # Same business logic, same per-brand RBAC gate (``_can_approve``) as the
 # server-rendered routes; the SPA calls these with ``credentials:'include'`` so
