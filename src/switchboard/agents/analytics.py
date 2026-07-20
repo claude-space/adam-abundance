@@ -13,6 +13,81 @@ from .base import BaseAgent
 log = get_logger("agent.analytics")
 
 
+async def refresh_pay_baseline(ctx, brand: str, window_days: int = 180) -> bool:
+    """Refresh the brand-default WriterPayBaseline row (§16.4 Phase 10c) from the
+    consum table's real per-article ``WriterCost``: median USD per article and
+    median USD per word over the window. Inserts a new row only when none exists
+    or a rate moved >1% (rate history rides ``effective_at``). SENSITIVE data —
+    written to the access-controlled table only, never to shared memory. Soft-
+    fails to False when BigQuery is unavailable or the brand has no cost rows."""
+    from sqlalchemy import select
+
+    from ..adapters.analytics import _CONSUM_TABLE
+    from ..adapters.base import AdapterUnavailable
+    from ..adapters.clients.bigquery import BigQueryClient
+    from ..db.models import WriterPayBaseline
+
+    if brand == "portfolio":
+        return False
+    try:
+        bc = ctx.settings.brand(brand)
+        client = BigQueryClient(ctx.creds.google_sa())
+    except (KeyError, AdapterUnavailable):
+        return False
+    sql = f"""
+        SELECT APPROX_QUANTILES(WriterCost, 2)[OFFSET(1)] AS usd_per_article,
+               APPROX_QUANTILES(SAFE_DIVIDE(WriterCost, NULLIF(WordCount, 0)), 2)[OFFSET(1)] AS usd_per_word,
+               COUNT(*) AS n
+        FROM {_CONSUM_TABLE}
+        WHERE Brand=@brand AND WriterCost IS NOT NULL AND WriterCost > 0
+          AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {int(window_days)} DAY)
+          AND PubDate <  CURRENT_DATE('America/New_York')
+    """
+    params = {"brand": bc.short_code}
+    try:
+        estimated = await client.estimate_bytes(sql, params)
+        if not await ctx.governor.within_caps("bq_bytes", additional=estimated):
+            log.info("[analytics] pay baseline skipped for %s — bq_bytes cap", brand)
+            return False
+        res = await client.query(sql, params)
+    except Exception as exc:  # noqa: BLE001 — BQ offline/erroring → skip softly
+        log.info("[analytics] pay baseline query failed for %s: %s", brand, exc)
+        return False
+    await ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+    row = res.rows[0] if res.rows else {}
+    per_article = row.get("usd_per_article")
+    per_word = row.get("usd_per_word")
+    n = int(row.get("n") or 0)
+    if not n or per_article is None:
+        log.info("[analytics] pay baseline: no WriterCost rows for %s in %sd", brand, window_days)
+        return False
+    per_article = round(float(per_article), 2)
+    per_word = round(float(per_word), 4) if per_word is not None else None
+
+    current = (await ctx.session.execute(
+        select(WriterPayBaseline)
+        .where(WriterPayBaseline.brand == brand, WriterPayBaseline.author.is_(None))
+        .order_by(WriterPayBaseline.effective_at.desc())
+        .limit(1))).scalar_one_or_none()
+
+    def _close(a: float | None, b: float | None) -> bool:
+        if a is None or b is None:
+            return a == b
+        return abs(a - b) <= 0.01 * max(abs(a), abs(b), 1e-9)
+
+    if current is not None and _close(current.usd_per_article, per_article) \
+            and _close(current.usd_per_word, per_word):
+        return False
+    ctx.session.add(WriterPayBaseline(
+        brand=brand, author=None,
+        usd_per_article=per_article, usd_per_word=per_word))
+    await ctx.session.flush()
+    log.info("[analytics] pay baseline refreshed for %s (n=%s articles, %sd window)",
+             brand, n, window_days)
+    return True
+
+
 class AnalyticsAgent(BaseAgent):
     name = "analytics"
 
@@ -22,6 +97,10 @@ class AnalyticsAgent(BaseAgent):
         written += await self._session_trends(brand)
         written += await self._writer_stats(brand)
         written += await self._style_profile(brand)
+        # Pay baseline (§16.4): sensitive → DB row only, never a memory entry,
+        # so it contributes nothing to `written`.
+        await refresh_pay_baseline(self.ctx, brand,
+                                   self._int_cred("WRITER_PAY_WINDOW_DAYS", 180))
         return written
 
     def _int_cred(self, key: str, default: int) -> int:
