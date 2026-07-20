@@ -413,7 +413,8 @@ def _artifact_row(job: Any) -> dict[str, Any]:
 
 
 def _md_to_draft(md: str, *, title: str, brand: str, kind: str, generated: str,
-                 artifact_id: str, hero_image: dict[str, Any] | None = None) -> dict[str, Any]:
+                 artifact_id: str, hero_image: dict[str, Any] | None = None,
+                 hero_images: dict[str, Any] | None = None) -> dict[str, Any]:
     """Parse a real markdown draft into the magazine-layout fields the website
     preview renders (dropcap lede → body → pull-quote → body). Keeps the exact
     Lovable layout, populated with the artifact's real text."""
@@ -491,10 +492,13 @@ def _md_to_draft(md: str, *, title: str, brand: str, kind: str, generated: str,
         "heroGradient": "linear-gradient(135deg,#1a1a1a,#3a3a3a)",
         # Operator-chosen hero image (via the picker) — full URL + attribution;
         # None until one is selected, so the preview falls back to the gradient.
+        # heroImage is the default/website hero; heroImages holds per-channel
+        # overrides (each channel's preview can carry its own picture).
         "heroImage": (hero_image or {}).get("url"),
         "heroCredit": (hero_image or {}).get("credit"),
         "heroCreditUrl": (hero_image or {}).get("credit_url"),
         "heroSource": (hero_image or {}).get("source"),
+        "heroImages": hero_images or {},
         "heroBadge": f"{len((md or '').split())} words",
         "dropcap": (lede[:1] or "T").upper(),
         "lede": lede[1:] if lede else "",
@@ -640,7 +644,9 @@ async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
             "note": quality.get("note"),
             "article": _md_to_draft(body, title=row["title"], brand=brand,
                                     kind=job.content_type, generated=generated, artifact_id=row["id"],
-                                    hero_image=(job.preview_meta or {}).get("hero_image")),
+                                    hero_image=((job.preview_meta or {}).get("hero_images") or {}).get("web")
+                                               or (job.preview_meta or {}).get("hero_image"),
+                                    hero_images=(job.preview_meta or {}).get("hero_images") or {}),
             "breakdown": _breakdown_rows(breakdown),
             "signals": _artifact_signals(breakdown, scoring.fact_gate(trend)),
             "timeline": _artifact_timeline(job, row),
@@ -724,15 +730,18 @@ async def artifact_image_candidates(request: Request, artifact_id: str,
 
 @router.post("/artifacts/{artifact_id}/hero-image")
 async def artifact_set_hero_image(request: Request) -> dict[str, Any]:
-    """Persist (or clear) the artifact's chosen hero image. Body: {url, credit,
-    credit_url, source} — or {url: null} to clear. Stored on preview_meta so the
-    review preview and any downstream publish read the same selection."""
+    """Persist (or clear) a chosen hero image for one preview channel. Body:
+    {channel, url, credit, credit_url, source} — or {url: null} to clear that
+    channel. Stored per-channel on preview_meta.hero_images so each preview can
+    carry its own picture; the ``web`` channel also syncs the legacy hero_image
+    (the article/publish default)."""
     u = require_user(request)
     artifact_id = request.path_params["artifact_id"]
     job_id = _parse_artifact_id(artifact_id)
     if job_id is None:
         raise HTTPException(status_code=404, detail="artifact not found")
     body = await _json_body(request)
+    channel = (body.get("channel") or "web").strip() or "web"
     from sqlalchemy import select
 
     from ..db.models import ContentJob
@@ -742,20 +751,31 @@ async def artifact_set_hero_image(request: Request) -> dict[str, Any]:
         if job is None:
             raise HTTPException(status_code=404, detail="artifact not found")
         meta = dict(job.preview_meta or {})
+        images = dict(meta.get("hero_images") or {})
         url = body.get("url")
+        obj = None
         if url:
-            meta["hero_image"] = {
+            obj = {
                 "url": str(url),
                 "credit": (body.get("credit") or None),
                 "credit_url": (body.get("credit_url") or None),
                 "source": (body.get("source") or None),
                 "chosen_by": u.get("email"),
             }
+            images[channel] = obj
         else:
-            meta.pop("hero_image", None)
+            images.pop(channel, None)
+        meta["hero_images"] = images
+        # Keep the legacy single hero_image (article/publish default) == the web
+        # channel's image.
+        if channel == "web":
+            if obj:
+                meta["hero_image"] = obj
+            else:
+                meta.pop("hero_image", None)
         job.preview_meta = meta          # reassign so SQLAlchemy flags the JSONB dirty
         await ctx.session.flush()
-    return {"ok": True, "hero_image": meta.get("hero_image")}
+    return {"ok": True, "channel": channel, "hero_image": obj, "hero_images": images}
 
 
 # --- Distribution (§6.6 outbound artifacts) -----------------------------------
