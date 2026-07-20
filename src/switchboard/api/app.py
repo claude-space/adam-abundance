@@ -84,10 +84,13 @@ def create_app() -> FastAPI:
         async def _spa_shell(request: Request, call_next):
             if request.method not in ("GET", "HEAD"):
                 return await call_next(request)
-            # scope["path"], NOT request.url.path: with root_path (APP_BASE_PATH)
-            # set, url.path is the EXTERNAL path (prefix included) while the
-            # proxy-stripped path the app actually routes on lives in the scope.
+            # Normalize to the app-relative path. Starlette's root_path handling
+            # varies by version (some prepend it to scope["path"], some don't),
+            # so strip the configured base_path when present — a no-op on root
+            # mounts and correct under either semantic.
             path = request.scope.get("path", "/")
+            if base_path and path.startswith(base_path):
+                path = path[len(base_path):] or "/"
             if any(path == p or path.startswith(p + "/") for p in passthrough):
                 return await call_next(request)
             # Real file in the build (hashed assets, brand images, favicon)?
