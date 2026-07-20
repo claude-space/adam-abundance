@@ -434,6 +434,31 @@ class WriterPersona(Base):
     )
 
 
+class BrandTopicDemand(Base):
+    """Per-brand topic (category) demand distilled from the consum article-analysis
+    table (§16.3): which content categories pull the most reader sessions for a
+    brand. Snapshot — the latest per brand is the truth (refresh = replace). Feeds
+    both the Topic-demand panel and the Trend Score's brand_demand factor, so the
+    scout prioritizes on-brand-demand topics (e.g. motorcycles for TopSpeed)."""
+
+    __tablename__ = "brand_topic_demand"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    brand: Mapped[str] = mapped_column(Text, nullable=False)
+    category: Mapped[str] = mapped_column(Text, nullable=False)
+    articles: Mapped[int] = mapped_column(Integer, nullable=False)
+    avg_sessions: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_rpm: Mapped[float | None] = mapped_column(Float)
+    demand_index: Mapped[float] = mapped_column(Float, nullable=False)   # avg_sessions ÷ brand mean; >1 = above average
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)           # 1 = highest demand
+    window_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (Index("ix_brand_topic_demand_brand_rank", "brand", "rank"),)
+
+
 class PricingConfig(Base):
     """USD pricing that turns raw usage into dollars (PRD §16.4). One source for
     BOTH the governor's caps and the read-only Expenditure view."""

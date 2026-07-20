@@ -96,6 +96,7 @@ class AnalyticsAgent(BaseAgent):
         written += await self._rollup(brand)
         written += await self._session_trends(brand)
         written += await self._writer_stats(brand)
+        written += await self._topic_demand(brand)
         written += await self._style_profile(brand)
         # Pay baseline (§16.4): sensitive → DB row only, never a memory entry,
         # so it contributes nothing to `written`.
@@ -108,6 +109,84 @@ class AnalyticsAgent(BaseAgent):
             return int(self.ctx.creds.resolve(key, secret=False) or default)
         except (ValueError, TypeError):
             return default
+
+    # -- topic demand (PRD §16.3) --------------------------------------------
+
+    async def _topic_demand(self, brand: str) -> int:
+        """Which content categories pull the most reader sessions for this brand
+        (§16.3), from the consum article-analysis table. Snapshot replace: the
+        latest set per brand is the truth. Feeds the Topic-demand panel AND the
+        Trend Score's brand_demand factor. Soft-fails when BigQuery is down."""
+        if brand == "portfolio":
+            return 0
+        from datetime import datetime, timezone
+
+        from sqlalchemy import delete as _delete
+
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+        from ..db.models import BrandTopicDemand
+
+        try:
+            bc = self.ctx.settings.brand(brand)
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except (KeyError, AdapterUnavailable):
+            return 0
+        window_days = self._int_cred("TOPIC_DEMAND_WINDOW_DAYS", 180)
+        min_articles = self._int_cred("TOPIC_DEMAND_MIN_ARTICLES", 15)
+        top_n = self._int_cred("TOPIC_DEMAND_TOP_N", 12)
+        sql = f"""
+            SELECT PriCat AS category, COUNT(*) AS articles,
+                   AVG(COALESCE(ActSessSentinel, 0)) AS avg_sessions,
+                   AVG(COALESCE(RPM, 0)) AS avg_rpm
+            FROM {_CONSUM_TABLE}
+            WHERE Brand=@brand AND PriCat IS NOT NULL AND PriCat != ''
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+            GROUP BY PriCat
+            HAVING COUNT(*) >= {min_articles}
+            ORDER BY avg_sessions DESC
+        """
+        params = {"brand": bc.short_code}
+        try:
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=await client.estimate_bytes(sql, params)):
+                log.info("[analytics] topic_demand skipped for %s — bq_bytes cap", brand)
+                return 0
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[analytics] topic_demand query failed for %s: %s", brand, exc)
+            return 0
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+        rows = [r for r in res.rows if (r.get("avg_sessions") or 0) > 0]
+        if not rows:
+            return 0
+        # demand_index = category avg sessions ÷ the brand's mean across categories
+        # (so >1 = above-average pull). Ranked by raw avg sessions.
+        mean = sum(float(r["avg_sessions"]) for r in rows) / len(rows)
+        rows.sort(key=lambda r: float(r["avg_sessions"]), reverse=True)
+
+        await self.ctx.session.execute(_delete(BrandTopicDemand).where(BrandTopicDemand.brand == brand))
+        kept = rows[:top_n]
+        for i, r in enumerate(kept, start=1):
+            self.ctx.session.add(BrandTopicDemand(
+                brand=brand, category=str(r["category"]), articles=int(r["articles"]),
+                avg_sessions=round(float(r["avg_sessions"]), 1),
+                avg_rpm=round(float(r["avg_rpm"]), 2) if r.get("avg_rpm") is not None else None,
+                demand_index=round(float(r["avg_sessions"]) / mean, 3) if mean > 0 else 1.0,
+                rank=i, window_days=window_days))
+        await self.ctx.session.flush()
+
+        await self.ctx.store.write(EntryDraft(
+            type=EntryType.METRIC, brand=brand, source_agent="analytics", source_system="bigquery",
+            payload={"kind": "topic_demand", "window_days": window_days,
+                     "top": [{"category": str(r["category"]),
+                              "avg_sessions": round(float(r["avg_sessions"]), 1)} for r in kept[:5]]},
+            confidence=0.9, ttl_seconds=14 * 24 * 3600))
+        log.info("[analytics] topic_demand for %s — %d categories (top: %s)",
+                 brand, len(kept), kept[0]["category"] if kept else "—")
+        return 1
 
     # -- top-writer stats (PRD §16.3) ----------------------------------------
 
