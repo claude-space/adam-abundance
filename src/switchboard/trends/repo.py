@@ -415,10 +415,11 @@ class PipelineRepo:
     # -- lifecycle: jobs ---------------------------------------------------------
 
     async def add_job(self, pipeline: ContentPipeline, *, content_type: str, transport: str,
-                      instructions: str | None = None) -> ContentJob:
+                      instructions: str | None = None, persona_id: int | None = None) -> ContentJob:
         job = ContentJob(
             pipeline_id=pipeline.id, content_type=content_type, transport=transport,
             status=ContentJobStatus.QUEUED.value, instructions=instructions,
+            persona_id=persona_id,
         )
         self.session.add(job)
         await self.session.flush()

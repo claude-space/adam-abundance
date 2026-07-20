@@ -43,9 +43,15 @@ _DEAD_AFTER = timedelta(minutes=30)   # a running job with no external ref died 
 
 async def approve_and_start(ctx: RunContext, pipeline_id: int, approver: str, *,
                             content_types: list[str] | None = None,
-                            instructions: str | None = None) -> ContentPipeline:
+                            instructions: str | None = None,
+                            persona_id: int | None = None) -> ContentPipeline:
     """Record the human approval, queue one job per content type, and notify.
-    Generation itself happens in the job worker (fast-path or sweep)."""
+    Generation itself happens in the job worker (fast-path or sweep).
+
+    The writer persona (§16.3) is resolved once here for the whole pipeline: an
+    explicit ``persona_id`` (manual pick), else round-robin across the brand's
+    enabled personas. None ⇒ the generator falls back to the aggregate house
+    style profile — so this is a no-op until personas exist."""
     repo = PipelineRepo(ctx.session)
     pipeline = await repo.get(pipeline_id)
     if pipeline is None:
@@ -61,10 +67,16 @@ async def approve_and_start(ctx: RunContext, pipeline_id: int, approver: str, *,
             "Lift suppression on the trend to override, then approve.")
     pipeline = await repo.approve(pipeline_id, approver,
                                   content_types=content_types, instructions=instructions)
+    # Resolve the writer persona once for the whole pipeline (manual pick or
+    # rotation); every job in it writes in the same voice.
+    from . import personas
+    chosen = await personas.pick_persona(ctx.session, pipeline.brand, persona_id)
+    chosen_id = chosen.id if chosen is not None else None
     transports = ctx.settings.trends
     for content_type in pipeline.content_types or []:
         await repo.add_job(pipeline, content_type=content_type,
-                           transport=transports.transport_for(content_type))
+                           transport=transports.transport_for(content_type),
+                           persona_id=chosen_id)
     await repo.set_status(pipeline.id, PipelineStatus.GENERATING.value,
                           actor=approver, detail="jobs queued")
     if pipeline.trend_id is not None:
@@ -198,6 +210,17 @@ async def _run_job(ctx: RunContext, job_id: int) -> str:
         external_ref=result.external_ref or job.external_ref, cost=cost, error=None,
     )
     await _write_preview_entry(ctx, pipeline, job, preview_ref, result.preview_meta)
+    # Roll the metered LLM spend up to the PipelineCost row NOW, at generation —
+    # that's when the dollars are actually spent. Publishing is CMS-gated and
+    # rare, so waiting for it (the old behaviour) left real generation cost
+    # invisible in the Expenditure view. Idempotent upsert keyed by pipeline id,
+    # and best-effort: a rollup hiccup must never fail the generated preview.
+    try:
+        fresh = await repo.get(pipeline.id)   # reload so .jobs carries this job's cost
+        if fresh is not None:
+            await _record_pipeline_cost(ctx, fresh)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("[pipeline] preview-time cost rollup failed for %s: %s", pipeline.id, exc)
     after = await repo.refresh_rollup(pipeline.id)
     if after == PipelineStatus.PREVIEWS_READY.value and before != after:
         headline = trend.headline if trend else f"pipeline #{pipeline.id}"
