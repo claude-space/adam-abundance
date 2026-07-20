@@ -1423,7 +1423,21 @@ async def session_trends_api(request: Request) -> dict[str, Any]:
             latest[b] = p
     ordered = [b for b in settings.brand_keys if b in latest]
     ordered += [b for b in latest if b not in ordered and b != "portfolio"]
-    return {"trends": [_session_trend_spa(latest[b]) for b in ordered]}
+    # Per-brand topic demand (§16.3): which categories pull the most sessions.
+    from sqlalchemy import select as _select
+
+    from ..db.models import BrandTopicDemand
+    async with RunContext.open() as ctx:
+        drows = (await ctx.session.execute(
+            _select(BrandTopicDemand).order_by(BrandTopicDemand.brand, BrandTopicDemand.rank))).scalars().all()
+    demand: dict[str, list[dict[str, Any]]] = {}
+    for r in drows:
+        demand.setdefault(r.brand, []).append({
+            "category": r.category, "articles": r.articles,
+            "avg_sessions": r.avg_sessions, "avg_rpm": r.avg_rpm,
+            "demand_index": r.demand_index, "rank": r.rank})
+    return {"trends": [_session_trend_spa(latest[b]) for b in ordered],
+            "topic_demand": demand}
 
 
 # --- Agent detail -----------------------------------------------------------------

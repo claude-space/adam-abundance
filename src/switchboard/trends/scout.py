@@ -10,6 +10,7 @@ rejects non-human actors), and every proposal is capped
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -90,6 +91,10 @@ class TrendScout:
         # Operator-tuned score weights (§13.19) — loaded once per scan.
         from .weights import load_effective
         score_weights = await load_effective(self.ctx.session)
+        # Brand topic-demand terms (§16.3): high-demand categories → weighted
+        # match terms, so on-brand-demand topics (e.g. motorcycles for TopSpeed)
+        # score higher. Loaded once per scan.
+        demand_terms = await self._demand_terms(brand)
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
@@ -121,7 +126,7 @@ class TrendScout:
                 cluster, watchlist=cfg.watchlist, covered=covered,
                 corroborating_monitors=monitors,
                 topic_momentum=momentum, theme_fatigue=fatigue,
-                weights=score_weights)
+                demand_terms=demand_terms, weights=score_weights)
             trend, created = await self.trends.upsert(
                 brand=brand, cluster_key=cluster.cluster_key(), headline=cluster.headline,
                 score=score, score_breakdown=breakdown,
@@ -296,6 +301,35 @@ class TrendScout:
                     and nb["state"] in _STATE_DECLINE:
                 r = max(r, round(sim * _STATE_DECLINE[nb["state"]], 3))
         return q, (r or None)
+
+    async def _demand_terms(self, brand: str) -> list[tuple[str, float]]:
+        """Turn the brand's stored topic demand into weighted match terms for the
+        scorer: each high-demand category's distinctive words (de-pluralized so a
+        substring match catches plurals), weighted by the category's demand_index
+        normalized to the brand's strongest. Empty when demand isn't computed yet
+        → the brand_demand factor simply contributes nothing."""
+        from sqlalchemy import select as _select
+
+        from ..db.models import BrandTopicDemand
+
+        rows = (await self.ctx.session.execute(
+            _select(BrandTopicDemand).where(BrandTopicDemand.brand == brand)
+            .order_by(BrandTopicDemand.rank))).scalars().all()
+        if not rows:
+            return []
+        top_index = max((r.demand_index for r in rows), default=1.0) or 1.0
+        # Generic words that would over-match any auto headline carry no brand signal.
+        generic = {"cars", "car", "news", "vehicle", "vehicles", "and", "the", "for",
+                   "with", "other", "misc", "general", "&"}
+        terms: dict[str, float] = {}
+        for r in rows:
+            weight = max(0.0, min(1.0, r.demand_index / top_index))
+            for word in re.split(r"[^a-z0-9]+", r.category.lower()):
+                if len(word) < 4 or word in generic:
+                    continue
+                stem = word[:-1] if word.endswith("s") and len(word) > 4 else word
+                terms[stem] = max(terms.get(stem, 0.0), weight)
+        return sorted(terms.items(), key=lambda kv: -kv[1])
 
     async def _session_momentum(self) -> dict[str, float]:
         """Per-OEM reader-session momentum from the consum table (last 8 weeks,

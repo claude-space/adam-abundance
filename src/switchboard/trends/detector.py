@@ -230,6 +230,7 @@ DEFAULT_SCORE_WEIGHTS: dict[str, float] = {
     "coverage_gap_unknown": 8.0,
     "breaking": 12.0,
     "stale_penalty": 10.0,
+    "brand_demand": 14.0,
     "sat_outlets": _SAT_OUTLETS,
 }
 
@@ -272,6 +273,10 @@ SCORE_WEIGHT_META: list[dict[str, Any]] = [
     {"key": "stale_penalty", "label": "Stale penalty",
      "help": "Penalty when the newest signal is more than 48h old.",
      "sign": "penalty", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "brand_demand", "label": "Brand topic demand",
+     "help": "Bonus when the trend's topic matches a high-demand category for the brand "
+             "(e.g. motorcycles for TopSpeed), scaled by how strong that demand is.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
     {"key": "sat_outlets", "label": "Saturation threshold (outlets)",
      "help": "How many competitor outlets a topic needs before it reads as fully saturated. Not points — a divisor.",
      "sign": "neutral", "kind": "threshold", "min": 1.0, "max": 20.0},
@@ -307,6 +312,7 @@ def score_cluster(
     corroborated: bool = False,        # back-compat: True ≡ HC Viral Hits corroborated
     topic_momentum: float | None = None,   # F2: same-topic performance −1..+1 (None = unknown)
     theme_fatigue: float | None = None,    # F3: adjacent-theme decay 0..1 (None/0 = none)
+    demand_terms: Iterable[tuple[str, float]] = (),  # (term, 0..1 weight) for the brand's high-demand categories
     weights: dict[str, float] | None = None,   # operator overrides; None ⇒ shipped defaults
     now: datetime | None = None,
 ) -> tuple[float, dict[str, float]]:
@@ -346,6 +352,16 @@ def score_cluster(
 
     text = " ".join(i.get("title", "") for i in cluster.items).lower()
     breakdown["watchlist"] = w["watchlist"] if any(x.lower() in text for x in watchlist if x) else 0.0
+
+    # Brand topic demand (§16.3): if the cluster matches one of the brand's
+    # high-demand categories, add points scaled by that category's demand weight.
+    best_demand = 0.0
+    for term, weight in demand_terms:
+        t = (term or "").lower().strip()
+        if t and t in text:
+            best_demand = max(best_demand, max(0.0, min(1.0, weight)))
+    if best_demand > 0:
+        breakdown["brand_demand"] = round(w["brand_demand"] * best_demand, 1)
 
     if covered is True:
         breakdown["coverage_gap"] = 0.0
