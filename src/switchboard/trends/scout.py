@@ -87,6 +87,9 @@ class TrendScout:
         dr_titles = await self._daily_reporting_titles()
         neigh = await self._neighborhood_trends(brand)
         session_mom = await self._session_momentum()
+        # Operator-tuned score weights (§13.19) — loaded once per scan.
+        from .weights import load_effective
+        score_weights = await load_effective(self.ctx.session)
 
         expired = await self.trends.expire_stale()
         summary: dict[str, Any] = {
@@ -117,7 +120,8 @@ class TrendScout:
             score, breakdown = detector.score_cluster(
                 cluster, watchlist=cfg.watchlist, covered=covered,
                 corroborating_monitors=monitors,
-                topic_momentum=momentum, theme_fatigue=fatigue)
+                topic_momentum=momentum, theme_fatigue=fatigue,
+                weights=score_weights)
             trend, created = await self.trends.upsert(
                 brand=brand, cluster_key=cluster.cluster_key(), headline=cluster.headline,
                 score=score, score_breakdown=breakdown,

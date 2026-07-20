@@ -755,6 +755,58 @@ async def users_set_role(request: Request) -> dict[str, Any]:
     return {"ok": True}
 
 
+# --- Trend Score weights (§13.19) -----------------------------------------------
+
+
+@router.get("/trend-score-weights")
+async def get_trend_score_weights(request: Request) -> dict[str, Any]:
+    """The Trend Score formula's weights: effective value + shipped default +
+    editor metadata (label/help/range/sign) per weight. `may_edit` gates the
+    editor to admins."""
+    u = require_user(request)
+    from ..trends.detector import DEFAULT_SCORE_WEIGHTS, SCORE_WEIGHT_META
+    from ..trends.weights import load_overrides
+    async with RunContext.open() as ctx:
+        overrides = await load_overrides(ctx.session)
+    weights = [{**m,
+                "value": round(overrides.get(m["key"], DEFAULT_SCORE_WEIGHTS[m["key"]]), 4),
+                "default": DEFAULT_SCORE_WEIGHTS[m["key"]],
+                "customized": m["key"] in overrides}
+               for m in SCORE_WEIGHT_META]
+    return {"weights": weights, "customized": bool(overrides),
+            "may_edit": u.get("role") in ("global_admin", "portfolio_admin")}
+
+
+@router.post("/trend-score-weights")
+async def set_trend_score_weights(request: Request) -> dict[str, Any]:
+    """Persist new Trend Score weights (admin only). Body: {"weights": {key: value}}.
+    Each value is clamped to its range; unchanged keys are skipped. Takes effect
+    on the next Trend Scout scan."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    body = await _json_body(request)
+    values = body.get("weights")
+    if not isinstance(values, dict):
+        raise HTTPException(status_code=400, detail="weights object required")
+    from ..trends.weights import save_weights
+    async with RunContext.open() as ctx:
+        written = await save_weights(ctx.session, values, updated_by=u.get("email"))
+    return {"ok": True, "updated": written}
+
+
+@router.post("/trend-score-weights/reset")
+async def reset_trend_score_weights(request: Request) -> dict[str, Any]:
+    """Reset every Trend Score weight to its shipped default (admin only)."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    from ..trends.weights import reset_weights
+    async with RunContext.open() as ctx:
+        n = await reset_weights(ctx.session, updated_by=u.get("email"))
+    return {"ok": True, "reset": n}
+
+
 # --- Governor -------------------------------------------------------------------
 
 

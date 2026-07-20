@@ -214,6 +214,78 @@ _NOVELTY_MAX = 18.0            # F2a: first-mover reward when competitors haven'
 _SATURATION_PENALTY = 18.0     # F2b: max penalty when a saturated topic is ALSO fading
 _FATIGUE_MAX = 15.0            # F3: max penalty when an adjacent theme is aging + declining
 
+# The full set of operator-tunable weights, with their shipped defaults. Persisted
+# overrides (trend_score_weight table) are merged over these at scoring time; an
+# empty table ⇒ these values. Keep keys stable — the API/UI and DB reference them.
+DEFAULT_SCORE_WEIGHTS: dict[str, float] = {
+    "corroboration_bonus": _CORROBORATION_BONUS,
+    "corroboration_max": _CORROBORATION_MAX,
+    "novelty_max": _NOVELTY_MAX,
+    "saturation_penalty": _SATURATION_PENALTY,
+    "fatigue_max": _FATIGUE_MAX,
+    "velocity_per_unit": 8.0,
+    "velocity_max": 16.0,
+    "watchlist": 15.0,
+    "coverage_gap_uncovered": 15.0,
+    "coverage_gap_unknown": 8.0,
+    "breaking": 12.0,
+    "stale_penalty": 10.0,
+    "sat_outlets": _SAT_OUTLETS,
+}
+
+# UI metadata: how each weight is described and constrained in the editor. `sign`
+# drives colour (adds vs penalties); `kind=threshold` marks the non-point knob.
+SCORE_WEIGHT_META: list[dict[str, Any]] = [
+    {"key": "corroboration_bonus", "label": "Corroboration · per monitor",
+     "help": "Points added for each independent system (HC-Viral, daily-reporting) that also found the topic.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "corroboration_max", "label": "Corroboration · cap",
+     "help": "Maximum total corroboration points, however many monitors agree.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 60.0},
+    {"key": "novelty_max", "label": "Novelty (first-mover)",
+     "help": "Reward when competitors haven't covered the topic yet; scales down as more outlets pile in.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "saturation_penalty", "label": "Saturation penalty",
+     "help": "Penalty when a topic is BOTH widely covered and fading (poor same-topic momentum).",
+     "sign": "penalty", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "fatigue_max", "label": "Theme fatigue penalty",
+     "help": "Penalty when an adjacent, older theme is aging and declining.",
+     "sign": "penalty", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "velocity_per_unit", "label": "Velocity · per signal/hour",
+     "help": "Points per unit of signal velocity (items per hour across the cluster).",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 30.0},
+    {"key": "velocity_max", "label": "Velocity · cap",
+     "help": "Maximum points velocity alone can contribute.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "watchlist", "label": "Watchlist match",
+     "help": "Bonus when the topic matches a brand's configured watchlist term.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "coverage_gap_uncovered", "label": "Coverage gap · we're uncovered",
+     "help": "Bonus when we confirmed we have NOT covered this topic yet.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "coverage_gap_unknown", "label": "Coverage gap · unknown",
+     "help": "Smaller benefit-of-the-doubt bonus when our coverage of the topic is unknown.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "breaking", "label": "Breaking news",
+     "help": "Bonus when the headline reads as breaking (recall, crash, unveiled…) and not evergreen.",
+     "sign": "positive", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "stale_penalty", "label": "Stale penalty",
+     "help": "Penalty when the newest signal is more than 48h old.",
+     "sign": "penalty", "kind": "point", "min": 0.0, "max": 40.0},
+    {"key": "sat_outlets", "label": "Saturation threshold (outlets)",
+     "help": "How many competitor outlets a topic needs before it reads as fully saturated. Not points — a divisor.",
+     "sign": "neutral", "kind": "threshold", "min": 1.0, "max": 20.0},
+]
+
+
+def resolve_weights(weights: dict[str, float] | None) -> dict[str, float]:
+    """Merge persisted overrides over the shipped defaults, keeping only known keys."""
+    merged = dict(DEFAULT_SCORE_WEIGHTS)
+    for k, v in (weights or {}).items():
+        if k in merged and v is not None:
+            merged[k] = float(v)
+    return merged
+
 
 def topic_similarity(cluster: Cluster, other_tokens: Iterable[str],
                      other_oems: Iterable[str] = ()) -> float:
@@ -235,11 +307,15 @@ def score_cluster(
     corroborated: bool = False,        # back-compat: True ≡ HC Viral Hits corroborated
     topic_momentum: float | None = None,   # F2: same-topic performance −1..+1 (None = unknown)
     theme_fatigue: float | None = None,    # F3: adjacent-theme decay 0..1 (None/0 = none)
+    weights: dict[str, float] | None = None,   # operator overrides; None ⇒ shipped defaults
     now: datetime | None = None,
 ) -> tuple[float, dict[str, float]]:
     """Score 0–100 with an explainable breakdown (surfaced in the console). See
-    the module-level equation above for the three headline factors."""
+    the module-level equation above for the three headline factors. ``weights``
+    lets an operator retune each factor's magnitude (§13.19); omitted keys fall
+    back to DEFAULT_SCORE_WEIGHTS, so the function stays back-compatible."""
     now = now or datetime.now(timezone.utc)
+    w = resolve_weights(weights)
     breakdown: dict[str, float] = {}
 
     # F1 — corroboration across independent monitoring systems.
@@ -247,42 +323,42 @@ def score_cluster(
     if corroborated:
         monitors.add("hc_viral_hits")
     if monitors:
-        breakdown["corroboration"] = min(len(monitors) * _CORROBORATION_BONUS, _CORROBORATION_MAX)
+        breakdown["corroboration"] = min(len(monitors) * w["corroboration_bonus"], w["corroboration_max"])
 
     # F2 — competitor coverage × performance.
-    cov = min(max((len(cluster.sources) - 1) / _SAT_OUTLETS, 0.0), 1.0)
-    breakdown["novelty"] = round(_NOVELTY_MAX * (1.0 - cov), 1)          # first-mover reward
+    cov = min(max((len(cluster.sources) - 1) / max(w["sat_outlets"], 0.5), 0.0), 1.0)
+    breakdown["novelty"] = round(w["novelty_max"] * (1.0 - cov), 1)      # first-mover reward
     q = 0.0 if topic_momentum is None else max(-1.0, min(1.0, topic_momentum))
     if cov > 0 and q < 0:                                                 # covered AND fading
-        breakdown["saturation_penalty"] = round(_SATURATION_PENALTY * cov * q, 1)  # q<0 ⇒ negative
+        breakdown["saturation_penalty"] = round(w["saturation_penalty"] * cov * q, 1)  # q<0 ⇒ negative
 
     # F3 — adjacent-theme fatigue (a related, older trend is declining).
     r = 0.0 if theme_fatigue is None else max(0.0, min(1.0, theme_fatigue))
     if r > 0:
-        breakdown["theme_fatigue"] = round(-_FATIGUE_MAX * r, 1)
+        breakdown["theme_fatigue"] = round(-w["fatigue_max"] * r, 1)
 
     times = cluster.times()
     velocity = 0.0
     if len(times) >= 2:
         hours = max((times[-1] - times[0]).total_seconds() / 3600.0, 0.5)
         velocity = len(times) / hours
-    breakdown["velocity"] = min(velocity * 8.0, 16.0)
+    breakdown["velocity"] = min(velocity * w["velocity_per_unit"], w["velocity_max"])
 
     text = " ".join(i.get("title", "") for i in cluster.items).lower()
-    breakdown["watchlist"] = 15.0 if any(w.lower() in text for w in watchlist if w) else 0.0
+    breakdown["watchlist"] = w["watchlist"] if any(x.lower() in text for x in watchlist if x) else 0.0
 
     if covered is True:
         breakdown["coverage_gap"] = 0.0
     elif covered is False:
-        breakdown["coverage_gap"] = 15.0
+        breakdown["coverage_gap"] = w["coverage_gap_uncovered"]
     else:  # unknown — mild benefit of the doubt
-        breakdown["coverage_gap"] = 8.0
+        breakdown["coverage_gap"] = w["coverage_gap_unknown"]
 
     is_breaking = bool(_BREAKING_RE.search(text)) and not _EVERGREEN_RE.search(text)
-    breakdown["breaking"] = 12.0 if is_breaking else 0.0
+    breakdown["breaking"] = w["breaking"] if is_breaking else 0.0
 
     if times and (now - times[-1]) > timedelta(hours=48):
-        breakdown["stale_penalty"] = -10.0
+        breakdown["stale_penalty"] = -w["stale_penalty"]
 
     total = max(0.0, min(sum(breakdown.values()), 100.0))
     return total, breakdown
