@@ -32,10 +32,10 @@ from datetime import date, timedelta
 
 import pytest
 
-from switchboard.adapters import actions, analytics, opportunity, paid_media, production
+from switchboard.adapters import actions, opportunity, paid_media, production
 from switchboard.adapters.base import AdapterUnavailable
 from switchboard.adapters.clients.bigquery import BQResult
-from switchboard.config import Settings, SpendCaps
+from switchboard.config import Settings
 from switchboard.credentials import (
     BingAdsCreds,
     FacebookAdsCreds,
@@ -44,7 +44,7 @@ from switchboard.credentials import (
     GoogleSA,
 )
 from switchboard.db.enums import EntryType
-from switchboard.interfaces import ActionResult, CostSpec, EntryDraft, PlanItemView
+from switchboard.interfaces import CostSpec, PlanItemView
 
 # ---------------------------------------------------------------------------
 # Fakes

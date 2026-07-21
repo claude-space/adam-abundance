@@ -119,7 +119,6 @@ class AnalyticsAgent(BaseAgent):
         Trend Score's brand_demand factor. Soft-fails when BigQuery is down."""
         if brand == "portfolio":
             return 0
-        from datetime import datetime, timezone
 
         from sqlalchemy import delete as _delete
 

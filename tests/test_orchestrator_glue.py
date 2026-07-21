@@ -23,7 +23,6 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import httpx
-import pytest
 
 import switchboard.orchestrator.cycle as cycle_mod
 import switchboard.orchestrator.planner as planner_mod
