@@ -253,9 +253,18 @@ async def notifications(request: Request, limit: int = 60) -> dict[str, Any]:
     user = require_user(request)
     async with RunContext.open() as ctx:
         items = await routes._notification_items(ctx, min(max(limit, 1), 200))
-        read = await routes._read_notification_keys(ctx, user.get("email") or "")
-        for n in items:
-            n["read"] = n.get("key") in read
+    # Per-user read-state is an optional overlay. Look it up in a SEPARATE context
+    # so a failure — e.g. migration 0012 (notification_read) not yet applied on a
+    # freshly pulled deploy — degrades to "all unread" instead of aborting the
+    # transaction and 500ing the feed + the sidebar badge that polls this route.
+    read: set[str] = set()
+    try:
+        async with RunContext.open() as ctx2:
+            read = await routes._read_notification_keys(ctx2, user.get("email") or "")
+    except Exception:  # noqa: BLE001 — overlay must never break the core feed
+        read = set()
+    for n in items:
+        n["read"] = n.get("key") in read
     return {"items": items}
 
 

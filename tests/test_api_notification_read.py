@@ -96,3 +96,19 @@ async def test_read_all_marks_everything_and_persists(api):
 
     # Marking all again is a no-op.
     assert (await api.post("/api/notifications/read-all", json={})).json()["read"] == 0
+
+
+async def test_get_degrades_when_read_state_unavailable(api, monkeypatch):
+    """If the read-state store errors (e.g. migration 0012 not yet applied on a
+    fresh deploy), the feed must still render — all items simply read as unread."""
+    from switchboard.api import routes
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("relation \"notification_read\" does not exist")
+
+    monkeypatch.setattr(routes, "_read_notification_keys", _boom)
+    r = await api.get("/api/notifications")
+    assert r.status_code == 200
+    items = r.json()["items"]
+    assert isinstance(items, list)
+    assert all(n["read"] is False for n in items)
