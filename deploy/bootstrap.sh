@@ -12,6 +12,11 @@
 #
 #     git pull && pm2 reload ecosystem.config.js --update-env
 #
+# ...because the `serve` process now runs `alembic upgrade head` on startup
+# (cli._auto_migrate), so migrations self-apply on every reload. This one-time
+# bootstrap still creates the venv, installs deps, and does the FIRST migration
+# before the first `pm2 start`. Re-run it when Python deps change.
+#
 # Requirements: Python >= 3.11 on PATH (set $PYTHON to override), and a populated
 # repo-local .env (see .env.prod.example) providing DATABASE_URL etc.
 

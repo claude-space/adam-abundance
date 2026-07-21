@@ -6,11 +6,14 @@
 //   switchboard-web        uvicorn (the approval console + /api/* + /run)
 //   switchboard-scheduler  APScheduler loop (morning cycle + feeders)
 //
-// ONE-TIME VM SETUP (before the first `pm2 start`): create the venv, install the
-// package, and run migrations. See deploy/bootstrap.sh — run it once after the
-// first clone. The deploy webhook then just needs `git pull && pm2 reload
-// ecosystem.config.js --update-env` on push to main. If code deps change, re-run
-// bootstrap (it is idempotent).
+// ONE-TIME VM SETUP (before the first `pm2 start`): create the venv + install the
+// package. See deploy/bootstrap.sh — run it once after the first clone. The deploy
+// webhook then just needs `git pull && pm2 reload ecosystem.config.js --update-env`
+// on push to main: the `switchboard-web` (`serve`) process runs `alembic upgrade
+// head` on startup (see cli._auto_migrate), so pending migrations self-apply on
+// every reload — no manual migrate step, and only the web process migrates (the
+// scheduler doesn't, so they never race). Disable with SWITCHBOARD_AUTO_MIGRATE=0.
+// Re-run bootstrap if Python deps change (it is idempotent).
 //
 // The repo-local `.env` (gitignored) is the single source of truth for config +
 // secrets, loaded here and injected into both processes — same pattern as the

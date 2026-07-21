@@ -515,6 +515,7 @@ def test_serve_launches_uvicorn_with_explicit_port(monkeypatch):
 
     run_mock = MagicMock()
     monkeypatch.setattr(uvicorn, "run", run_mock)
+    monkeypatch.setattr(cli, "_auto_migrate", MagicMock())  # don't shell out to alembic in tests
     settings = get_settings()
 
     assert cli.main(["serve", "--port", "1234", "--reload"]) == 0
@@ -532,6 +533,7 @@ def test_serve_defaults_port_to_settings(monkeypatch):
 
     run_mock = MagicMock()
     monkeypatch.setattr(uvicorn, "run", run_mock)
+    monkeypatch.setattr(cli, "_auto_migrate", MagicMock())  # don't shell out to alembic in tests
     settings = get_settings()
 
     assert cli.main(["serve"]) == 0
@@ -544,6 +546,41 @@ def test_serve_without_uvicorn_returns_1(monkeypatch, capsys):
     monkeypatch.setitem(sys.modules, "uvicorn", None)
     assert cli.main(["serve"]) == 1
     assert "uvicorn not installed." in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# auto-migrate (serve applies pending migrations; subprocess boundary mocked)
+# ---------------------------------------------------------------------------
+
+def test_auto_migrate_disabled_skips(monkeypatch):
+    run_mock = MagicMock()
+    monkeypatch.setattr("subprocess.run", run_mock)
+    monkeypatch.setenv("SWITCHBOARD_AUTO_MIGRATE", "0")
+    cli._auto_migrate()
+    run_mock.assert_not_called()
+
+
+def test_auto_migrate_runs_alembic_upgrade(monkeypatch):
+    run_mock = MagicMock()
+    monkeypatch.setattr("subprocess.run", run_mock)
+    monkeypatch.delenv("SWITCHBOARD_AUTO_MIGRATE", raising=False)  # default on
+    cli._auto_migrate()
+    run_mock.assert_called_once()
+    cmd = run_mock.call_args.args[0]
+    assert cmd[1:] == ["-m", "alembic", "upgrade", "head"]
+    assert run_mock.call_args.kwargs.get("check") is True
+
+
+def test_auto_migrate_failure_aborts_startup(monkeypatch):
+    import subprocess
+
+    def _boom(*_a, **_k):
+        raise subprocess.CalledProcessError(1, ["alembic"])
+
+    monkeypatch.setattr("subprocess.run", _boom)
+    monkeypatch.delenv("SWITCHBOARD_AUTO_MIGRATE", raising=False)
+    with pytest.raises(SystemExit):
+        cli._auto_migrate()
 
 
 if __name__ == "__main__":  # pragma: no cover
