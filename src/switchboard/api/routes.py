@@ -497,10 +497,10 @@ TYPE_COLORS = {"metric": "#5b9dff", "flag": "#d6a021", "fact": "#3fb950", "claim
 # Make the color lookups available to every template.
 templates.env.globals["agent_color"] = lambda k: AGENT_COLORS.get(k, "#6f7887")
 templates.env.globals["type_color"] = lambda t: TYPE_COLORS.get(t, "#6f7887")
-# Service logo via logo.dev (needs a publishable token); "" → template shows a monogram.
+# Service logo via our cache-proxy (/api/logo) — fetches from logo.dev once, then
+# serves from disk; keeps the token server-side. "" → template shows a monogram.
 templates.env.globals["logo_url"] = lambda domain: (
-    f"https://img.logo.dev/{domain}?token={get_settings().logo_dev_token}&size=64&format=png&retina=true"
-    if get_settings().logo_dev_token and domain else ""
+    f"/api/logo?d={domain}&s=128" if get_settings().logo_dev_token and domain else ""
 )
 
 # OEM (automaker) → domain for logo.dev, keyed lowercase to match the detector's
