@@ -493,6 +493,23 @@ class TrendScoreWeight(Base):
     __table_args__ = (Index("ix_trend_score_weight_key_effective", "key", "effective_at"),)
 
 
+class AppSetting(Base):
+    """Key→JSON app configuration editable from the admin UI (integrations /
+    automations — e.g. the trend-alert outbound webhook). One row per setting
+    key; last write wins. Reads/writes go through ``switchboard.notifications``
+    and friends, never raw."""
+
+    __tablename__ = "app_setting"
+
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    updated_by: Mapped[str | None] = mapped_column(Text)          # editor's email
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+
 class WriterPayBaseline(Base):
     """SENSITIVE, access-controlled (PRD §16.4 / §13.16): per-article/word human
     pay rates, used only for the AI-vs-human cost comparison."""

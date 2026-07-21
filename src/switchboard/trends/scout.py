@@ -30,6 +30,7 @@ from ..db.enums import PORTFOLIO, EntryType, TrendStatus
 from ..db.models import Trend
 from ..interfaces import EntryDraft
 from ..logging_ import get_logger
+from ..notifications import fire_trend_alert
 from ..orchestrator.slack import notify_trend_event
 from . import detector
 from .dossier import collect_dossier
@@ -457,6 +458,9 @@ class TrendScout:
             headline=trend.headline, trend_id=trend.id, pipeline_id=pipeline.id,
             score=trend.score,
         )
+        # Outbound trend-alert webhook (admin-configurable, threshold-gated).
+        # Best-effort — never raises into the scan path.
+        await fire_trend_alert(self.ctx, trend, pipeline_id=pipeline.id)
         return True
 
     async def _write_flag(self, trend: Trend, note: str | None = None) -> None:
