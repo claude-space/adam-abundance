@@ -1077,6 +1077,63 @@ async def reset_trend_score_weights(request: Request) -> dict[str, Any]:
     return {"ok": True, "reset": n}
 
 
+# --- Integrations / notification config -----------------------------------------
+
+
+def _require_admin(request: Request) -> dict[str, Any]:
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    return u
+
+
+@router.get("/notification-config")
+async def notification_config_get(request: Request) -> dict[str, Any]:
+    """Admin config for outbound integrations. Currently the trend-alert webhook,
+    which fires when the Scout surfaces a trend scoring >= min_score."""
+    _require_admin(request)
+    from ..notifications import load_trend_alert
+    async with RunContext.open() as ctx:
+        trend_alert = await load_trend_alert(ctx.session)
+    return {"trend_alert": trend_alert}
+
+
+@router.post("/notification-config")
+async def notification_config_set(request: Request) -> dict[str, Any]:
+    """Persist the trend-alert webhook config (admin only). Body:
+    {"trend_alert": {"enabled": bool, "webhook_url": str, "min_score": number}}."""
+    u = _require_admin(request)
+    body = await _json_body(request)
+    ta = body.get("trend_alert") if isinstance(body.get("trend_alert"), dict) else body
+    ta = ta if isinstance(ta, dict) else {}
+    from ..notifications import save_trend_alert
+    try:
+        async with RunContext.open() as ctx:
+            saved = await save_trend_alert(
+                ctx.session, enabled=ta.get("enabled"), webhook_url=ta.get("webhook_url"),
+                min_score=ta.get("min_score"), updated_by=u.get("email"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "trend_alert": saved}
+
+
+@router.post("/notification-config/test")
+async def notification_config_test(request: Request) -> dict[str, Any]:
+    """Fire a synthetic test ping at the webhook (admin only). Uses the URL in
+    the request body if given, otherwise the saved one."""
+    _require_admin(request)
+    body = await _json_body(request)
+    from ..notifications import load_trend_alert, send_test_ping
+    url = str((body or {}).get("webhook_url") or "").strip()
+    if not url:
+        async with RunContext.open() as ctx:
+            url = (await load_trend_alert(ctx.session))["webhook_url"]
+    if not url:
+        raise HTTPException(status_code=400, detail="no webhook_url configured")
+    ok, detail = await send_test_ping(url)
+    return {"ok": ok, "detail": detail}
+
+
 # --- Governor -------------------------------------------------------------------
 
 
