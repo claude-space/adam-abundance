@@ -31,6 +31,58 @@ async def me(request: Request) -> dict[str, Any]:
             "brands": u.get("brands") or []}
 
 
+import re as _re
+
+_LOGO_DOMAIN_RE = _re.compile(r"^[a-z0-9][a-z0-9.-]{1,79}$")
+
+
+@router.get("/logo")
+async def logo_proxy(request: Request, d: str, s: int = 64):
+    """Cache-proxy for brand/OEM logos. Fetches each (domain,size) from logo.dev
+    exactly ONCE, stores the bytes on disk, and serves every subsequent request
+    from that cache — so we never re-spend a logo.dev request for a logo we've
+    already seen, and the logo.dev token stays server-side. SSRF-safe: the domain
+    is strictly validated and only ever interpolated into the logo.dev host."""
+    require_user(request)
+    import os
+    from pathlib import Path
+
+    from fastapi.responses import Response
+
+    domain = (d or "").strip().lower()
+    if "/" in domain or ".." in domain or not _LOGO_DOMAIN_RE.match(domain):
+        raise HTTPException(status_code=400, detail="invalid domain")
+    size = max(16, min(int(s or 64), 256))
+    cache_dir = Path(os.environ.get("LOGO_CACHE_DIR", "logo_cache")).resolve()
+    fp = cache_dir / f"{domain}_{size}.png"
+    headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+    if fp.is_file():
+        return Response(content=fp.read_bytes(), media_type="image/png", headers=headers)
+
+    token = get_settings().logo_dev_token
+    if not token:
+        raise HTTPException(status_code=404, detail="logo source not configured")
+    import httpx  # type: ignore
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as c:
+            r = await c.get(f"https://img.logo.dev/{domain}",
+                            params={"token": token, "size": size, "format": "png",
+                                    "fallback": "monogram"})
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail="logo fetch failed")
+    if r.status_code != 200 or not r.content:
+        raise HTTPException(status_code=404, detail="logo not found")
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp = fp.with_suffix(".tmp")
+        tmp.write_bytes(r.content)
+        tmp.replace(fp)                       # atomic publish into the cache
+    except Exception:  # noqa: BLE001 — cache write is best-effort; still serve the bytes
+        pass
+    return Response(content=r.content, media_type="image/png", headers=headers)
+
+
 @router.get("/writers")
 async def writers(request: Request, brand: str | None = None) -> dict[str, Any]:
     """Writer-emulation data (§16.3): per-brand top-writer leaderboard + versioned
