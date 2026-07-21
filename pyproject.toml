@@ -67,6 +67,7 @@ research = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.5",
     "mypy>=1.10",
 ]
@@ -88,3 +89,24 @@ target-version = "py311"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Coverage flags live in CI (--cov-fail-under) so a local run without a DB
+# (integration tests skip) never fails on the floor. `pytest --cov` still works.
+
+[tool.coverage.run]
+source = ["switchboard"]
+branch = true
+omit = [
+    "*/__main__.py",
+    "*/devseed.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+    "if __name__ == .__main__.:",
+]
