@@ -45,13 +45,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      # uv resolves + installs the heavy data/research SDKs (bigquery, google-api,
+      # gspread, trafilatura, …) in a few seconds vs ~20s for pip, and caches wheels.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
 
       - name: Install (app + data/research extras + dev)
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[data,research,dev]"
+        run: uv pip install --system -e ".[data,research,dev]"
 
       - name: Lint (ruff, non-blocking)
         continue-on-error: true
@@ -60,9 +63,13 @@ jobs:
       - name: Migrate database
         run: alembic upgrade head
 
+      # -n auto --dist loadscope: run test files across all runner cores, but keep
+      # each module on ONE worker so the DB-backed suites (which isolate rows by a
+      # per-module marker) never race each other. Verified stable across repeated
+      # parallel runs. pytest-cov combines per-worker coverage automatically.
       - name: Tests + coverage (fails under floor)
         run: >-
-          pytest -q
+          pytest -q -n auto --dist loadscope
           --cov=switchboard
           --cov-report=term-missing
           --cov-report=xml
