@@ -249,6 +249,39 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _auto_migrate() -> None:
+    """Apply pending DB migrations (``alembic upgrade head``) before the web server
+    binds, so a deploy that adds a migration is self-applying — the prod deploy
+    webhook only does ``git pull && pm2 reload``, NOT migrations.
+
+    Runs as a SUBPROCESS on purpose: alembic's env.py spins its own asyncio loop +
+    engine, and doing that in-process would leave a pool bound to a dead loop for
+    the server to trip over. Only the ``serve`` process migrates (the scheduler
+    does not), so two processes never race a concurrent upgrade. Fail-loud: a
+    migration error stops startup rather than silently serving a stale schema.
+    Opt out with ``SWITCHBOARD_AUTO_MIGRATE=0``.
+    """
+    import os
+
+    if os.getenv("SWITCHBOARD_AUTO_MIGRATE", "1").strip().lower() in ("0", "false", "no", "off"):
+        log.info("auto-migrate disabled via SWITCHBOARD_AUTO_MIGRATE")
+        return
+
+    import subprocess
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]  # …/src/switchboard/cli.py -> repo root
+    log.info("auto-migrate: alembic upgrade head")
+    try:
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+                       cwd=str(root), check=True)
+    except subprocess.CalledProcessError as exc:
+        log.error("auto-migrate failed (alembic exit %s) — refusing to start with a stale "
+                  "schema; set SWITCHBOARD_AUTO_MIGRATE=0 to bypass", exc.returncode)
+        raise SystemExit(1) from exc
+    log.info("auto-migrate: schema up to date")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     try:
         import uvicorn
@@ -256,6 +289,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         print("uvicorn not installed.")
         return 1
     settings = get_settings()
+    _auto_migrate()
     uvicorn.run("switchboard.api.app:app", host="0.0.0.0", port=args.port or settings.port,
                 reload=args.reload, root_path=settings.base_path or "")
     return 0
