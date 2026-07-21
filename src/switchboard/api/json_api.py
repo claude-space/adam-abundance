@@ -248,10 +248,38 @@ async def activity(request: Request, limit: int = 60) -> dict[str, Any]:
 
 @router.get("/notifications")
 async def notifications(request: Request, limit: int = 60) -> dict[str, Any]:
-    """Human-actionable items — flags, failed pipelines/jobs, spend-cap hits."""
-    require_user(request)
+    """Human-actionable items — flags, failed pipelines/jobs, spend-cap hits.
+    Each item carries a stable ``key`` and a per-user ``read`` flag."""
+    user = require_user(request)
     async with RunContext.open() as ctx:
-        return {"items": await routes._notification_items(ctx, min(max(limit, 1), 200))}
+        items = await routes._notification_items(ctx, min(max(limit, 1), 200))
+        read = await routes._read_notification_keys(ctx, user.get("email") or "")
+        for n in items:
+            n["read"] = n.get("key") in read
+    return {"items": items}
+
+
+@router.post("/notifications/read")
+async def notifications_mark_read(request: Request) -> dict[str, Any]:
+    """Mark specific notification item-keys read for the current user (idempotent)."""
+    user = require_user(request)
+    body = await _json_body(request)
+    raw = body.get("keys")
+    keys = [str(k) for k in raw if k] if isinstance(raw, list) else []
+    async with RunContext.open() as ctx:
+        n = await routes._mark_notifications_read(ctx, user.get("email") or "", keys)
+    return {"ok": True, "read": n}
+
+
+@router.post("/notifications/read-all")
+async def notifications_mark_all_read(request: Request) -> dict[str, Any]:
+    """Mark every currently-actionable notification read for the current user."""
+    user = require_user(request)
+    async with RunContext.open() as ctx:
+        items = await routes._notification_items(ctx, 200)
+        keys = [n["key"] for n in items if n.get("key")]
+        n = await routes._mark_notifications_read(ctx, user.get("email") or "", keys)
+    return {"ok": True, "read": n}
 
 
 @router.get("/trends")
