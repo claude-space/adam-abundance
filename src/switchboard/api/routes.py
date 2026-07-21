@@ -30,7 +30,16 @@ from ..adapters.registry import ACTION_REGISTRY, owned_tool_names
 from ..config import get_settings
 from ..context import RunContext
 from ..db.enums import EntryType
-from ..db.models import ContentJob, ContentPipeline, MemoryEntry, Plan, PlanItem, ToolCallLog, Trend
+from ..db.models import (
+    ContentJob,
+    ContentPipeline,
+    MemoryEntry,
+    NotificationRead,
+    Plan,
+    PlanItem,
+    ToolCallLog,
+    Trend,
+)
 from ..logging_ import get_logger
 from ..orchestrator.dispatch import Dispatcher
 from ..orchestrator.plans import ApprovalError, PlanRepo
@@ -2025,7 +2034,7 @@ async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str
     for f in flags:
         p = f.payload or {}
         sev = {"high": "bad", "medium": "warn"}.get(str(p.get("severity", "")), "info")
-        out.append({"ts": f.created_at, "severity": sev,
+        out.append({"key": f"flag:{f.id}", "ts": f.created_at, "severity": sev,
                     "title": str(p.get("kind", "flag")).replace("_", " ").title(),
                     "detail": p.get("headline") or p.get("url") or p.get("note")
                               or f"{f.source_agent} · {f.brand}", "brand": f.brand})
@@ -2034,7 +2043,8 @@ async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str
         .order_by(desc(ContentJob.created_at)).limit(limit)
     )).scalars().all()
     for j in failed_jobs:
-        out.append({"ts": j.updated_at or j.created_at, "severity": "bad",
+        out.append({"key": f"content_job:{j.id}", "ts": j.updated_at or j.created_at,
+                    "severity": "bad",
                     "title": f"Content job failed — {j.content_type.replace('_', ' ')}",
                     "detail": (j.error or "generation failed")[:160],
                     "brand": j.pipeline.brand if j.pipeline else None})
@@ -2044,7 +2054,7 @@ async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str
     )).scalars().all()
     for it in failed_items:
         ref = it.result_ref or {}
-        out.append({"ts": it.created_at, "severity": "bad",
+        out.append({"key": f"plan_item:{it.id}", "ts": it.created_at, "severity": "bad",
                     "title": f"Plan item failed — {it.action_type}",
                     "detail": str(ref.get("refused") or ref.get("error") or "dispatch failed")[:160],
                     "brand": None})
@@ -2054,6 +2064,28 @@ async def _notification_items(ctx: RunContext, limit: int = 60) -> list[dict[str
         n["ago"] = _ago(n["ts"])
         n.pop("ts", None)
     return out
+
+
+async def _read_notification_keys(ctx: RunContext, email: str) -> set[str]:
+    """The set of notification item-keys this user has marked read."""
+    rows = (await ctx.session.execute(
+        select(NotificationRead.item_key).where(NotificationRead.user_email == email)
+    )).scalars().all()
+    return set(rows)
+
+
+async def _mark_notifications_read(ctx: RunContext, email: str, keys: list[str]) -> int:
+    """Mark the given item-keys read for this user. Returns how many were NEWLY
+    added — already-read keys are a no-op (idempotent). Commits via RunContext."""
+    keys = [k for k in dict.fromkeys(keys) if k]  # de-dup, preserve order, drop falsy
+    if not keys:
+        return 0
+    already = await _read_notification_keys(ctx, email)
+    fresh = [k for k in keys if k not in already]
+    for k in fresh:
+        ctx.session.add(NotificationRead(user_email=email, item_key=k))
+    await ctx.session.flush()
+    return len(fresh)
 
 
 @router.get("/activity", response_class=HTMLResponse)

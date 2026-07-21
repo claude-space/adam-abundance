@@ -510,6 +510,21 @@ class AppSetting(Base):
     )
 
 
+class NotificationRead(Base):
+    """Per-user read-state for the computed notification feed. Notifications are
+    derived from real rows (flags / failed jobs / failed plan items) so "read"
+    can't live on the item — we record the item KEY a user marked read. Composite
+    PK makes marking idempotent (mark-again is a no-op)."""
+
+    __tablename__ = "notification_read"
+
+    user_email: Mapped[str] = mapped_column(Text, primary_key=True)
+    item_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
 class WriterPayBaseline(Base):
     """SENSITIVE, access-controlled (PRD §16.4 / §13.16): per-article/word human
     pay rates, used only for the AI-vs-human cost comparison."""
