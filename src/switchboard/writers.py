@@ -62,13 +62,15 @@ def normalize_writers(
         except (TypeError, ValueError):
             cost = 0.0
         if cost > 0:
-            acc["cost_sum"] += cost; acc["cost_n"] += 1
+            acc["cost_sum"] += cost
+            acc["cost_n"] += 1
             try:
                 w = float(a.get("words") or 0)
             except (TypeError, ValueError):
                 w = 0.0
             if w > 0:
-                acc["words_sum"] += w; acc["words_n"] += 1
+                acc["words_sum"] += w
+                acc["words_n"] += 1
 
     out: list[dict[str, Any]] = []
     for author, acc in per.items():

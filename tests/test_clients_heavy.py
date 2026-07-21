@@ -469,7 +469,7 @@ async def test_bq_query_maps_rows_bytes_and_fields(monkeypatch):
 
 
 async def test_bq_query_empty_rows_empty_fields(monkeypatch):
-    cap = install_bigquery(monkeypatch, rows=[], total_bytes=0)
+    install_bigquery(monkeypatch, rows=[], total_bytes=0)
     install_build_credentials(monkeypatch, bq_mod)
     res = await BigQueryClient(GoogleSA(None, "key.json", "proj")).query("SELECT 1")
     assert res.rows == [] and res.fields == [] and res.bytes_processed == 0
@@ -751,7 +751,7 @@ def test_build_credentials_inline_takes_precedence_over_path(monkeypatch):
 
 def test_build_credentials_empty_inline_falls_through_to_path(monkeypatch):
     # inline_json="" is falsy -> the `if sa.inline_json` branch is skipped.
-    cap = install_service_account(monkeypatch)
+    install_service_account(monkeypatch)
     sa = GoogleSA(inline_json="", path="/k.json", project_id="p")
     out = build_credentials(sa, SHEETS_SCOPES)
     assert out[0] == "CREDS_FILE"

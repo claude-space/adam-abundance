@@ -95,7 +95,7 @@ class GSCAdapter(BaseAdapter):
         """
         client = BigQueryClient(self.ctx.creds.google_sa())
         try:
-            estimated = await client.estimate_bytes(sql)
+            await client.estimate_bytes(sql)
         except Exception as exc:  # noqa: BLE001 — table likely absent/empty
             return [EntryDraft(type=EntryType.FLAG, brand=brand, source_agent="opportunity",
                                source_system="gsc",

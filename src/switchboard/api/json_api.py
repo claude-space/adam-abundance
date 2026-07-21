@@ -9,6 +9,7 @@ never drift. ``require_user`` returns HTTP 401 JSON when unauthenticated.
 
 from __future__ import annotations
 
+import re as _re
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -30,8 +31,6 @@ async def me(request: Request) -> dict[str, Any]:
     return {"email": u.get("email"), "name": u.get("name"), "role": u.get("role"),
             "brands": u.get("brands") or []}
 
-
-import re as _re
 
 _LOGO_DOMAIN_RE = _re.compile(r"^[a-z0-9][a-z0-9.-]{1,79}$")
 
@@ -345,7 +344,7 @@ async def run_cycle(request: Request) -> dict[str, Any]:
 @router.post("/trends/scan")
 async def trends_scan(request: Request, background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Kick a real trend scan in the background for the caller's brand scope."""
-    user = require_user(request)
+    require_user(request)
     body = await _json_body(request)
     brand = (body.get("brand") or "portfolio").strip() or "portfolio"
     settings = get_settings()

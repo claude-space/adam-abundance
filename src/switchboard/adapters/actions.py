@@ -20,7 +20,7 @@ from ..artifacts import ArtifactStore
 from ..db.enums import EntryType
 from ..interfaces import ActionResult, CostSpec, EntryDraft, PlanItemView
 from ..logging_ import get_logger
-from ._http import get_json, post_json
+from ._http import post_json
 from .base import AdapterUnavailable, BaseAdapter
 
 log = get_logger("adapter.actions")
