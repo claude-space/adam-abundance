@@ -21,12 +21,13 @@ from datetime import date, datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..config import Settings, get_settings
+from ..config import Settings, SpendCaps, get_settings
 from ..db.enums import EntryType, PlanItemStatus
 from ..db.models import SpendLedger
 from ..interfaces import Decision, EntryDraft, PlanItemView
 from ..logging_ import get_logger
 from ..memory.store import MemoryStore
+from .caps_config import resolve_caps
 
 log = get_logger("governor")
 
@@ -47,6 +48,15 @@ class Governor:
         self.session = session
         self.settings = settings or get_settings()
         self.store = MemoryStore(session)
+        self._eff_caps: SpendCaps | None = None
+
+    async def _caps(self) -> SpendCaps:
+        """Effective caps = shipped defaults overlaid with the admin's runtime
+        override (Governor page). Resolved once per governor instance (= once per
+        operation) so a config change is picked up on the next action."""
+        if self._eff_caps is None:
+            self._eff_caps = await resolve_caps(self.session, self.settings.caps)
+        return self._eff_caps
 
     # -- sync policy: kill switch + approval gate + dry-run forcing -----------
 
@@ -101,13 +111,13 @@ class Governor:
         return int(result.scalar_one())
 
     async def remaining(self, metric: str) -> int | None:
-        cap = self.settings.caps.per_day(metric)
+        cap = (await self._caps()).per_day(metric)
         if cap is None:
             return None
         return max(0, cap - await self.spent_today(metric))
 
     async def within_caps(self, metric: str, *, additional: int = 0) -> bool:
-        cap = self.settings.caps.per_day(metric)
+        cap = (await self._caps()).per_day(metric)
         if cap is None:
             return True
         return (await self.spent_today(metric)) + additional <= cap
@@ -121,13 +131,13 @@ class Governor:
             amount = int(est.get(metric, 0) or 0)
             if amount <= 0:
                 continue
-            per_run = self.settings.caps.per_run(metric)
+            per_run = (await self._caps()).per_run(metric)
             if per_run is not None and amount > per_run:
                 violations.append(f"{metric}:per_run({amount}>{per_run})")
                 await self._write_cap_flag(item, metric, amount, per_run, scope="per_run")
                 continue
             if not await self.within_caps(metric, additional=amount):
-                cap = self.settings.caps.per_day(metric)
+                cap = (await self._caps()).per_day(metric)
                 spent = await self.spent_today(metric)
                 violations.append(f"{metric}:per_day({spent}+{amount}>{cap})")
                 await self._write_cap_flag(item, metric, spent + amount, cap or 0, scope="per_day")
