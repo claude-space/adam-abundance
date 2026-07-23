@@ -122,6 +122,28 @@ async def writers_activate(request: Request) -> dict[str, Any]:
     return {"ok": True, "brand": brand, "active_version": version}
 
 
+@router.get("/writers/profile/{profile_id}/top-articles")
+async def writers_top_articles(request: Request, profile_id: int, limit: int = 5) -> dict[str, Any]:
+    """Top-performing recent articles (by sessions) from a style profile's writers
+    — the live backing for the exemplars drawer. A governor-guarded consum read
+    that degrades to an empty list if BigQuery is unavailable."""
+    require_user(request)
+    from sqlalchemy import select
+
+    from ..agents.analytics import AnalyticsAgent
+    from ..db.models import WriterStyleProfile
+    async with RunContext.open() as ctx:
+        prof = (await ctx.session.execute(
+            select(WriterStyleProfile).where(WriterStyleProfile.id == profile_id))).scalar_one_or_none()
+        if prof is None:
+            raise HTTPException(status_code=404, detail="profile not found")
+        brand, version = prof.brand, prof.version
+        authors = list(prof.source_authors or [])
+        articles = await AnalyticsAgent(ctx).top_articles_by_authors(brand, authors, limit=limit)
+    return {"profile_id": profile_id, "brand": brand, "version": version,
+            "authors": authors, "articles": articles}
+
+
 @router.get("/personas")
 async def personas_list(request: Request, brand: str | None = None) -> dict[str, Any]:
     """Writer-replication personas for a brand (§16.3) — used by the trigger

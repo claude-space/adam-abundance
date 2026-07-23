@@ -395,6 +395,66 @@ class AnalyticsAgent(BaseAgent):
         log.info("[analytics] style_profile v%d for %s from %d exemplars", next_version, brand, len(scraped))
         return 1
 
+    async def top_articles_by_authors(
+        self, brand: str, authors: list[str], *, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """Live consum lookup: the best-performing recent articles (by Sentinel
+        sessions) among ``authors`` for ``brand``, highest first. Governor-guarded;
+        returns [] if BigQuery is unavailable or the daily byte-cap would be
+        exceeded. Backs the style-profile "top articles" drawer (§16.3)."""
+        from ..adapters.analytics import _CONSUM_TABLE
+        from ..adapters.base import AdapterUnavailable
+        from ..adapters.clients.bigquery import BigQueryClient
+
+        names = [a.strip() for a in (authors or []) if a and a.strip()]
+        if not names:
+            return []
+        limit = max(1, min(int(limit or 5), 20))
+        try:
+            client = BigQueryClient(self.ctx.creds.google_sa())
+        except AdapterUnavailable:
+            return []
+        bc = self.ctx.settings.brand(brand)
+        window_days = self._int_cred("WRITER_STATS_WINDOW_DAYS", 90)
+        sql = f"""
+            SELECT Writer AS author, ArticleTitle AS title, URL AS url,
+                   COALESCE(ActSessSentinel, 0) AS sessions
+            FROM {_CONSUM_TABLE}
+            WHERE Brand=@brand AND Writer IN UNNEST(@authors)
+              AND URL IS NOT NULL AND URL != ''
+              AND PubDate >= DATE_SUB(CURRENT_DATE('America/New_York'), INTERVAL {window_days} DAY)
+              AND PubDate <  CURRENT_DATE('America/New_York')
+            ORDER BY ActSessSentinel DESC LIMIT {limit}
+        """
+        params = {"brand": bc.short_code, "authors": names}
+        try:
+            estimated = await client.estimate_bytes(sql, params)
+            if not await self.ctx.governor.within_caps("bq_bytes", additional=estimated):
+                log.info("[analytics] top_articles skipped for %s — bq_bytes cap", brand)
+                return []
+            res = await client.query(sql, params)
+        except Exception as exc:  # noqa: BLE001
+            log.info("[analytics] top_articles query failed for %s: %s", brand, exc)
+            return []
+        await self.ctx.governor.charge("bq_bytes", getattr(res, "bytes_processed", 0) or 0, "analytics")
+
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for r in res.rows:
+            url = (r.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            if not url.startswith(("http://", "https://")):
+                url = "https://" + url.lstrip("/")
+            out.append({
+                "author": (r.get("author") or "").strip(),
+                "title": (r.get("title") or "").strip(),
+                "url": url,
+                "sessions": int(r.get("sessions") or 0),
+            })
+        return out
+
     async def distill_writer_persona(self, brand: str, author: str) -> int | None:
         """Distil a per-writer persona (§16.3) from ONE real writer's best recent
         articles: scrape their top exemplars, extract style features via the LLM,
