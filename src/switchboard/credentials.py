@@ -333,6 +333,7 @@ class Credentials:
             "semrush": "SEMRUSH_API_KEY",
             "copyscape": "COPYSCAPE_API_KEY",
             "copyleaks": "COPYLEAKS_API_KEY",
+            "plagiarism_webhook": "SWITCHBOARD_PUBLIC_URL",
             "google_sa_inline": "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON",
             "google_sa_file": "GOOGLE_APPLICATION_CREDENTIALS",
             "gmail": "GMAIL_REFRESH_TOKEN",
