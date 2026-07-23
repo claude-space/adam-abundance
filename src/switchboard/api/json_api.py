@@ -1180,13 +1180,15 @@ async def governor(request: Request) -> dict[str, Any]:
     code-enforced guardrails (as data, so nothing fabricated renders)."""
     require_user(request)
     settings = get_settings()
+    from ..governor.caps_config import resolve_caps
     async with RunContext.open() as ctx:
         spend = await routes._spend_snapshot(ctx)
         deltas = await routes._spend_deltas(ctx, spend)
         resources = await routes._resource_usage(ctx, spend, deltas)
+        eff = await resolve_caps(ctx.session, settings.caps)  # defaults + admin override
 
     def cap_row(name: str, metric: str, fmt) -> dict[str, Any]:
-        cap = settings.caps.per_day(metric)
+        cap = eff.per_day(metric)
         spent = spend[metric]["spent_today"]
         return {"name": name, "scope": "portfolio",
                 "limit": fmt(cap) if cap else "no cap set",
@@ -1207,13 +1209,60 @@ async def governor(request: Request) -> dict[str, Any]:
          "enabled": settings.dry_run_default},
         {"id": "daily_caps", "name": "Hard-stop at daily spend caps",
          "description": "Governor blocks metered calls once a daily cap is hit until reset.",
-         "enabled": settings.caps.enabled, "threshold": 100, "unit": "%"},
+         "enabled": eff.enabled, "threshold": 100, "unit": "%"},
         {"id": "kill_switch", "name": "Kill switch halts dispatch",
          "description": "Observe still runs; nothing dispatches while engaged.",
          "enabled": settings.kill_switch},
     ]
-    return {"kill_switch": settings.kill_switch, "caps_enabled": settings.caps.enabled,
+    return {"kill_switch": settings.kill_switch, "caps_enabled": eff.enabled,
             "caps": caps, "resources": resources, "rules": rules}
+
+
+@router.get("/spend-caps")
+async def spend_caps_get(request: Request) -> dict[str, Any]:
+    """Effective spend caps (operator units: $/day, GiB/day, units/day) + whether
+    they're a custom override or the shipped defaults. Any signed-in user may read
+    (the Governor page shows them); editing is admin-only."""
+    require_user(request)
+    settings = get_settings()
+    from ..governor.caps_config import caps_to_ui, load_override, resolve_caps
+    async with RunContext.open() as ctx:
+        override = await load_override(ctx.session)
+        eff = await resolve_caps(ctx.session, settings.caps)
+    return {"caps": caps_to_ui(eff), "customized": override is not None,
+            "defaults": caps_to_ui(settings.caps)}
+
+
+@router.post("/spend-caps")
+async def spend_caps_set(request: Request) -> dict[str, Any]:
+    """Save the caps override (admin only). Body (operator units):
+    {enabled: bool, llm_usd_per_day, bq_gib_per_day, ahrefs_units_per_day}."""
+    u = _require_admin(request)
+    body = await _json_body(request)
+    c = body.get("caps") if isinstance(body.get("caps"), dict) else body
+    c = c if isinstance(c, dict) else {}
+    from ..governor.caps_config import save_caps
+    try:
+        async with RunContext.open() as ctx:
+            saved = await save_caps(
+                ctx.session, enabled=c.get("enabled"),
+                llm_usd_per_day=c.get("llm_usd_per_day"),
+                bq_gib_per_day=c.get("bq_gib_per_day"),
+                ahrefs_units_per_day=c.get("ahrefs_units_per_day"),
+                updated_by=u.get("email"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "caps": saved}
+
+
+@router.post("/spend-caps/reset")
+async def spend_caps_reset(request: Request) -> dict[str, Any]:
+    """Delete the override — revert to the shipped env defaults (admin only)."""
+    _require_admin(request)
+    from ..governor.caps_config import reset_caps
+    async with RunContext.open() as ctx:
+        removed = await reset_caps(ctx.session)
+    return {"ok": True, "reset": removed}
 
 
 # --- Morning plans + plan-item approvals ----------------------------------------
