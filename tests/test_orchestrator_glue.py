@@ -504,7 +504,7 @@ def test_from_flags_emaki_backlog_without_ready_ids_falls_to_else():
     flags = [_entry({"kind": "emaki_backlog", "severity": "medium"})]
     (c,) = p._from_flags(flags, [])  # no queue metric -> ready_ids empty
     assert c.action_type == "notify"
-    assert c.params["message"] == "emaki_backlog"
+    assert c.params["message"] == "Emaki backlog"  # humanized, not the raw snake_case kind
     assert c.params["flag"] == {"kind": "emaki_backlog", "severity": "medium"}
     assert c.score == 60
 
@@ -564,12 +564,32 @@ def test_from_flags_unknown_kind_and_default_kind():
     p = _mk_planner()
     (c,) = p._from_flags([_entry({"kind": "mystery", "severity": "low"})], [])
     assert c.action_type == "notify"
-    assert c.params["message"] == "mystery"
+    assert c.params["message"] == "Mystery"  # humanized, not the raw snake_case kind
     assert c.score == _SEVERITY_SCORE["low"] == 30
 
     (c2,) = p._from_flags([_entry({})], [])   # no kind -> defaults to "flag"
-    assert c2.params["message"] == "flag"
+    assert c2.params["message"] == "Flag"
     assert c2.score == 60                      # default severity medium
+
+
+def test_from_flags_writer_below_index_is_specific():
+    p = _mk_planner()
+    (c,) = p._from_flags(
+        [
+            _entry({"kind": "writer_below_index", "writer": "B. Writer",
+                    "relative_index": 0.56, "articles": 9, "severity": "medium"})
+        ],
+        [],
+    )
+    assert c.action_type == "notify"
+    # Title names the writer + the index — not the raw "writer_below_index" kind.
+    assert "B. Writer" in c.params["message"]
+    assert "56%" in c.params["message"]
+    assert "writer_below_index" not in c.params["message"]
+    # Rationale explains what "below index" means in plain English.
+    assert "B. Writer" in c.rationale and "cohort average" in c.rationale
+    # Raw payload preserved for the params expander.
+    assert c.params["flag"]["relative_index"] == 0.56
 
 
 # -- _from_candidates --------------------------------------------------------
