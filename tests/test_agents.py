@@ -1077,6 +1077,59 @@ async def test_writer_stats_happy_path(monkeypatch):
     assert ("bq_bytes", 2000, "analytics") in ctx.governor.charges
 
 
+# -- top_articles_by_authors (§16.3 exemplars drawer) ------------------------
+
+
+async def test_top_articles_empty_authors_skips_query(monkeypatch):
+    fake = FakeBQ(estimate=1, rows=[{"author": "A", "title": "t", "url": "x", "sessions": 1}])
+    patch_bq(monkeypatch, fake)
+    agent = make_agent(AnalyticsAgent, make_ctx())
+    assert await agent.top_articles_by_authors("hotcars", []) == []
+    assert fake.queries == []  # never touched BigQuery
+
+
+async def test_top_articles_bq_unavailable(monkeypatch):
+    patch_bq_unavailable(monkeypatch)
+    agent = make_agent(AnalyticsAgent, make_ctx())
+    assert await agent.top_articles_by_authors("hotcars", ["A"]) == []
+
+
+async def test_top_articles_cap_blocks(monkeypatch):
+    patch_bq(monkeypatch, FakeBQ(estimate=999))
+    agent = make_agent(AnalyticsAgent, make_ctx(within=False))
+    assert await agent.top_articles_by_authors("hotcars", ["A"]) == []
+
+
+async def test_top_articles_query_error(monkeypatch):
+    patch_bq(monkeypatch, FakeBQ(estimate=1, query_exc=RuntimeError("boom")))
+    agent = make_agent(AnalyticsAgent, make_ctx())
+    assert await agent.top_articles_by_authors("hotcars", ["A"]) == []
+
+
+async def test_top_articles_happy_path(monkeypatch):
+    rows = [
+        {"author": "Martin", "title": "Big One", "url": "www.hotcars.com/big", "sessions": 500},
+        {"author": "Hank", "title": "Second", "url": "https://www.hotcars.com/two", "sessions": 300},
+        {"author": "Martin", "title": "Dup", "url": "www.hotcars.com/big", "sessions": 500},  # dupe url
+        {"author": "Jared", "title": "NoUrl", "url": "", "sessions": 10},  # empty url dropped
+    ]
+    fake = FakeBQ(estimate=5, bytes_processed=1234, rows=rows)
+    patch_bq(monkeypatch, fake)
+    ctx = make_ctx()
+    agent = make_agent(AnalyticsAgent, ctx)
+
+    out = await agent.top_articles_by_authors("hotcars", ["Martin", "Hank", "Jared"], limit=5)
+
+    # dedup by url + drop empty url; BigQuery's sessions-desc order preserved.
+    assert [a["title"] for a in out] == ["Big One", "Second"]
+    assert out[0]["url"] == "https://www.hotcars.com/big"  # protocol prepended
+    assert out[1]["url"] == "https://www.hotcars.com/two"  # already absolute
+    assert out[0]["sessions"] == 500 and out[0]["author"] == "Martin"
+    assert ("bq_bytes", 1234, "analytics") in ctx.governor.charges
+    _sql, params = fake.queries[0]
+    assert params["brand"] == "HC" and params["authors"] == ["Martin", "Hank", "Jared"]
+
+
 # -- _style_profile (§16.3) --------------------------------------------------
 
 
