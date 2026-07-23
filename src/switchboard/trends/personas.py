@@ -73,13 +73,48 @@ async def pick_persona(session: Any, brand: str, persona_id: int | None = None) 
 
 async def create_house_persona(session: Any, brand: str, name: str, *,
                                style_brief: str, features: dict | None = None,
+                               recipe: dict | None = None,
                                created_by: str | None = None) -> WriterPersona:
     p = WriterPersona(brand=brand, kind="house", name=name.strip(), author=None,
                       features=features, style_brief=style_brief.strip() or None,
-                      enabled=True, created_by=created_by)
+                      exemplar_refs=recipe or None, enabled=True, created_by=created_by)
     session.add(p)
     await session.flush()
     return p
+
+
+async def gather_blend(session: Any, brand: str, blend_ids: list[Any]) -> list[dict[str, Any]]:
+    """Resolve blend-source persona ids to {name, features} for a brand — only the
+    brand's own personas that actually carry distilled features. Caps at 5."""
+    out: list[dict[str, Any]] = []
+    for raw in (blend_ids or [])[:5]:
+        try:
+            pid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        p = await get_persona(session, pid)
+        if p is not None and p.brand == brand and p.features:
+            out.append({"name": p.name, "features": p.features})
+    return out
+
+
+async def synthesize_persona(
+    ctx: Any, *, brand: str, name: str, blend: list[dict[str, Any]],
+    dials: dict[str, str], notes: str,
+) -> tuple[dict[str, Any], str, int]:
+    """Fuse a Persona-Studio recipe (blended writer voices + dials + notes) into a
+    characterful 9-key style-feature set plus a demonstrating sample, via one LLM
+    call. Returns (features, sample, cost_micros). Raises AdapterUnavailable if the
+    LLM is down."""
+    from ..adapters.clients.llm import LLMClient
+    from .. import persona_studio
+
+    prompt = persona_studio.build_synth_prompt(name=name, blend=blend, dials=dials, notes=notes)
+    result = await LLMClient(ctx).complete(
+        system=persona_studio.SYNTH_SYSTEM, prompt=prompt,
+        model=ctx.settings.models.default, max_tokens=1200, agent="analytics")
+    features, sample = persona_studio.parse_synth(result.text or "")
+    return features, sample, getattr(result, "micros", 0) or 0
 
 
 async def set_enabled(session: Any, persona_id: int, enabled: bool) -> WriterPersona | None:

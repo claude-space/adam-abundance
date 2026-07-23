@@ -186,6 +186,84 @@ async def personas_create_house(request: Request) -> dict[str, Any]:
         return {"ok": True, "id": p.id, "name": p.name}
 
 
+@router.post("/personas/preview")
+async def personas_preview(request: Request) -> dict[str, Any]:
+    """Persona Studio: synthesize a characterful house voice from a recipe (a blend of
+    real writer voices + style dials + freeform character notes) and return the resulting
+    style features + a demonstrating sample paragraph — WITHOUT persisting. Admin only;
+    one governor-metered LLM call, no scraping."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    from .. import persona_studio
+    from ..adapters.base import AdapterUnavailable
+    from ..trends import personas
+
+    body = await _json_body(request)
+    brand = (body.get("brand") or "").strip()
+    if brand not in get_settings().brand_keys:
+        raise HTTPException(status_code=400, detail=f"unknown brand '{brand}'")
+    name = (body.get("name") or "").strip()
+    dials = persona_studio.clean_dials(body.get("dials"))
+    notes = (body.get("notes") or "").strip()
+    async with RunContext.open() as ctx:
+        blend = await personas.gather_blend(ctx.session, brand, body.get("blend_ids") or [])
+        try:
+            features, sample, _micros = await personas.synthesize_persona(
+                ctx, brand=brand, name=name, blend=blend, dials=dials, notes=notes)
+        except AdapterUnavailable as exc:
+            raise HTTPException(status_code=502, detail=f"voice synthesis unavailable: {exc}")
+    if not persona_studio.has_features(features):
+        raise HTTPException(status_code=502, detail="voice synthesis returned nothing usable")
+    return {"features": features, "sample": sample, "dials": dials,
+            "blend": [b["name"] for b in blend]}
+
+
+@router.post("/personas/studio")
+async def personas_create_studio(request: Request) -> dict[str, Any]:
+    """Persona Studio: create + persist a house persona from a recipe. If the client
+    passes the ``features`` it just previewed, they're reused (sanitised) so the saved
+    voice matches the preview; otherwise the voice is synthesized server-side. The recipe
+    (blend/dials/notes) is stored on the persona for later editing. Admin only."""
+    u = require_user(request)
+    if u.get("role") not in ("global_admin", "portfolio_admin"):
+        raise HTTPException(status_code=403, detail="admin only")
+    from .. import persona_studio
+    from ..adapters.base import AdapterUnavailable
+    from ..trends import personas
+
+    body = await _json_body(request)
+    brand = (body.get("brand") or "").strip()
+    name = (body.get("name") or "").strip()
+    if not (brand and name):
+        raise HTTPException(status_code=400, detail="brand and name are required")
+    if brand not in get_settings().brand_keys:
+        raise HTTPException(status_code=400, detail=f"unknown brand '{brand}'")
+    dials = persona_studio.clean_dials(body.get("dials"))
+    notes = (body.get("notes") or "").strip()
+    blend_ids = [int(x) for x in (body.get("blend_ids") or []) if str(x).isdigit()][:5]
+    async with RunContext.open() as ctx:
+        blend = await personas.gather_blend(ctx.session, brand, blend_ids)
+        features = persona_studio.coerce_features(body.get("features"))
+        if not persona_studio.has_features(features):
+            try:
+                features, _sample, _micros = await personas.synthesize_persona(
+                    ctx, brand=brand, name=name, blend=blend, dials=dials, notes=notes)
+            except AdapterUnavailable as exc:
+                raise HTTPException(status_code=502, detail=f"voice synthesis unavailable: {exc}")
+        if not persona_studio.has_features(features):
+            raise HTTPException(status_code=502, detail="couldn't build a usable voice")
+        recipe = {"blend_ids": blend_ids, "blend": [b["name"] for b in blend],
+                  "dials": dials, "notes": notes}
+        try:
+            p = await personas.create_house_persona(
+                ctx.session, brand, name, style_brief=notes, features=features,
+                recipe=recipe, created_by=u.get("email"))
+        except IntegrityError:
+            raise HTTPException(status_code=409, detail=f"a persona named '{name}' already exists")
+        return {"ok": True, "id": p.id, "name": p.name}
+
+
 @router.post("/personas/distill")
 async def personas_distill(request: Request) -> dict[str, Any]:
     """Distil a per-writer persona from a real top writer's corpus (admin). This
