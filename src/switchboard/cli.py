@@ -122,6 +122,19 @@ def cmd_sweep(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def cmd_backfill_flag_descriptions(args: argparse.Namespace) -> int:
+    from .context import RunContext
+    from .orchestrator.flag_text import backfill_flag_descriptions
+
+    async def _run() -> int:
+        async with RunContext.open() as ctx:
+            n = await backfill_flag_descriptions(ctx.session)
+        print(f"Rewrote {n} flag-derived plan item description(s) to the descriptive format.")
+        return 0
+
+    return asyncio.run(_run())
+
+
 def cmd_observe(args: argparse.Namespace) -> int:
     try:
         from .agents import build_agent  # Phase 2
@@ -307,6 +320,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("selfcheck", help="verify Phase 0 foundations").set_defaults(func=cmd_selfcheck)
     sub.add_parser("sweep", help="run the TTL sweep once").set_defaults(func=cmd_sweep)
+    sub.add_parser(
+        "backfill-flag-descriptions",
+        help="rewrite old vague flag plan-item descriptions to the current descriptive format",
+    ).set_defaults(func=cmd_backfill_flag_descriptions)
 
     obs = sub.add_parser("observe", help="run one agent's observe pass")
     obs.add_argument("agent")

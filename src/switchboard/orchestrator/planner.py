@@ -18,6 +18,7 @@ from ..adapters.clients.llm import LLMClient
 from ..context import RunContext
 from ..db.enums import EntryType
 from ..logging_ import get_logger
+from .flag_text import describe_flag
 from .plans import PlanRepo
 
 log = get_logger("orchestrator.planner")
@@ -133,43 +134,12 @@ class Planner:
                                       {"name": f"Content depth: refresh {p.get('url')}",
                                        "notes": f"Auditor flagged low depth ({p.get('depth_pct')}%) / AVD ({p.get('avd_seconds')}s)."},
                                       f"Content-depth finding on {p.get('url')} — create a refresh task."))
-            elif kind == "writer_below_index":
-                writer = p.get("writer") or "A writer"
-                idx = p.get("relative_index")
-                arts = p.get("articles")
-                bits = []
-                if isinstance(idx, (int, float)):
-                    bits.append(f"{idx * 100:.0f}% of the cohort average")
-                if arts:
-                    bits.append(f"{arts} articles")
-                detail = f" ({' · '.join(bits)})" if bits else ""
-                out.append(_Candidate(
-                    sev, "notify",
-                    {"message": f"Underperforming writer: {writer}{detail}", "flag": p},
-                    f"{writer} is scoring below the performance index"
-                    + (f" — relative index {idx} (1.0 = cohort average)"
-                       if isinstance(idx, (int, float)) else "")
-                    + (f", {arts} recent articles" if arts else "")
-                    + ". Consider coaching, reassigning topics, or rebalancing the writer mix.",
-                ))
             else:
-                # Unknown flag kind — still make it human: humanize the kind and
-                # surface whatever identifying field the payload carries, so the
-                # card isn't an opaque "Flag surfaced: <snake_case>".
-                label = kind.replace("_", " ")
-                ident = next(
-                    (str(p[k]) for k in ("writer", "url", "name", "title", "metric", "topic")
-                     if p.get(k) not in (None, "")),
-                    None,
-                )
-                title = (label[:1].upper() + label[1:]) if label else "Flag"
-                out.append(_Candidate(
-                    sev, "notify",
-                    {"message": title + (f" — {ident}" if ident else ""), "flag": p},
-                    f"Flag “{label}” surfaced"
-                    + (f" ({ident})" if ident else "")
-                    + " — review the details (expand params) and action or dismiss.",
-                ))
+                # writer_below_index + any other unhandled kind → a human title +
+                # rationale. Shared with the backfill (flag_text.describe_flag) so
+                # stored (old) and newly-planned items read identically.
+                title, rationale = describe_flag(p)
+                out.append(_Candidate(sev, "notify", {"message": title, "flag": p}, rationale))
         return out
 
     def _from_candidates(self, ctx_entries) -> list[_Candidate]:
