@@ -158,11 +158,23 @@ async def generate(ctx: RunContext, job: ContentJob, pipeline: ContentPipeline,
 
 # -- transports ------------------------------------------------------------------
 
+# Applied to EVERY LLM draft (personas or not) — the baseline defence against
+# generic "AI slop". No curly braces here (the parent string is .format()'d).
+_ANTI_SLOP = (
+    " Write like a human with a point of view, not a content mill. Vary sentence length "
+    "and use the occasional short fragment for punch. Open with something concrete — never "
+    "a throat-clearing preamble. Avoid AI/corporate tells: no 'in today's fast-paced world', "
+    "'it's worth noting', 'when it comes to', 'nestled', 'boasts', 'a testament to', "
+    "'game-changer', 'elevate', 'delve', 'realm', 'unleash', 'buckle up', 'need-to-know', "
+    "forced rule-of-three lists, 'not just X, but Y' constructions, or empty hedging. "
+    "Prefer specifics, concrete detail, and a real opinion over bland summary."
+)
+
 _LLM_SYSTEM = (
     "You are a senior editor at a major automotive publisher writing for the {brand} "
     "audience. You write clean, factual, engaging drafts. Never invent facts, quotes, "
     "or numbers; only use what the brief provides. Attribute unverified claims "
-    "(\"according to <outlet>\"). Output Markdown only."
+    "(\"according to <outlet>\"). Output Markdown only." + _ANTI_SLOP
 )
 
 _LLM_MAX_TOKENS = {"article": 3000, "social_post": 1200, "newsletter_blurb": 800,
@@ -176,7 +188,7 @@ async def _gen_llm(ctx: RunContext, job: ContentJob, brief: str) -> GenerationRe
 
     # Writer-emulation style layer (§16.3). Priority: the persona chosen for this
     # job (a per-writer or house voice, manual or rotated) → else the brand's
-    # aggregate active style profile → else nothing (byte-for-byte the old prompt).
+    # aggregate active style profile → else just the anti-slop baseline above.
     guide = ""
     meta_style: dict[str, Any] = {}
     persona = None
