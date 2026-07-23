@@ -331,6 +331,8 @@ class Credentials:
             "youtube": "YOUTUBE_API_KEY",
             "x": "X_BEARER_TOKEN",
             "semrush": "SEMRUSH_API_KEY",
+            "copyscape": "COPYSCAPE_API_KEY",
+            "copyleaks": "COPYLEAKS_API_KEY",
             "google_sa_inline": "GOOGLE_SHEETS_SERVICE_ACCOUNT_JSON",
             "google_sa_file": "GOOGLE_APPLICATION_CREDENTIALS",
             "gmail": "GMAIL_REFRESH_TOKEN",

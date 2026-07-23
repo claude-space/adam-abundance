@@ -708,20 +708,16 @@ def _breakdown_rows(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
             for k, lbl, w in _BREAKDOWN_LABELS]
 
 
-def _artifact_signals(breakdown: dict[str, Any], gate: dict[str, Any] | None) -> dict[str, Any]:
+def _artifact_signals(breakdown: dict[str, Any], gate: dict[str, Any] | None,
+                      plag: dict[str, Any] | None = None) -> dict[str, Any]:
+    from .. import plagiarism as plagiarism_mod
     return {
         "fact_gate": gate["label"] if gate else None,
         "voice_match": breakdown.get("brand_voice"),
-        "plagiarism": _plagiarism_signal(),
+        "plagiarism": plagiarism_mod.signal_text(plag),
         "seo_ceiling": breakdown.get("seo_ceiling"),
         "est_traffic": _traffic_signal(),
     }
-
-
-def _plagiarism_signal() -> str | None:
-    """Pluggable — wired when a plagiarism API (Copyscape/Originality.ai) is
-    configured. None → the SPA renders 'n/a'."""
-    return None
 
 
 def _traffic_signal() -> str | None:
@@ -823,6 +819,7 @@ async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
         body = routes._artifact_text(job.preview_ref) if job.preview_ref else ""
         quality = await _ensure_quality(ctx, job, body)
         breakdown = quality.get("breakdown") or {}
+        plag = (job.preview_meta or {}).get("plagiarism")
         row = _artifact_row(job)
         generated = routes._fmt_dt(job.created_at)
         detail = {
@@ -836,11 +833,115 @@ async def artifact_detail(request: Request, artifact_id: str) -> dict[str, Any]:
                                                or (job.preview_meta or {}).get("hero_image"),
                                     hero_images=(job.preview_meta or {}).get("hero_images") or {}),
             "breakdown": _breakdown_rows(breakdown),
-            "signals": _artifact_signals(breakdown, scoring.fact_gate(trend)),
+            "signals": _artifact_signals(breakdown, scoring.fact_gate(trend), plag),
+            "plagiarism": {
+                **(plag or {}),
+                "available": _plag_available(),
+                "may_run": routes._can_approve(request, brand),
+            },
             "timeline": _artifact_timeline(job, row),
             "may_approve": routes._can_approve(request, brand),
         }
     return detail
+
+
+def _plag_available() -> bool:
+    """True when at least one plagiarism provider is configured."""
+    from .. import plagiarism as plagiarism_mod
+    creds = get_settings().creds
+    return plagiarism_mod.copyscape_configured(creds) or plagiarism_mod.copyleaks_configured(creds)
+
+
+@router.post("/artifacts/{artifact_id}/plagiarism")
+async def artifact_run_plagiarism(request: Request, artifact_id: str) -> dict[str, Any]:
+    """Operator-triggered originality check on an artifact's draft: runs Copyscape
+    synchronously and submits a Copyleaks scan (async → webhook), persisting both on
+    the job's preview_meta['plagiarism']. Gated on the brand's approve permission
+    since each provider bills per query."""
+    require_user(request)
+    job_id = _parse_artifact_id(artifact_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    from .. import plagiarism as plag
+    from ..db.models import ContentJob
+    creds = get_settings().creds
+    if not (plag.copyscape_configured(creds) or plag.copyleaks_configured(creds)):
+        raise HTTPException(
+            status_code=400,
+            detail="no plagiarism provider configured — add COPYSCAPE_USERNAME (+key) "
+                   "and/or COPYLEAKS_EMAIL (+key, +SWITCHBOARD_PUBLIC_URL)")
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob)
+            .options(selectinload(ContentJob.pipeline))
+            .where(ContentJob.id == job_id))).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        brand = job.pipeline.brand if job.pipeline else "portfolio"
+        if not routes._can_approve(request, brand):
+            raise HTTPException(status_code=403, detail="not allowed for this brand")
+        body = routes._artifact_text(job.preview_ref) if job.preview_ref else ""
+        if len((body or "").strip()) < 40:
+            raise HTTPException(status_code=400, detail="draft has no checkable text yet")
+        meta = dict(job.preview_meta or {})
+        state = dict(meta.get("plagiarism") or {})
+        if plag.copyscape_configured(creds):
+            state["copyscape"] = await plag.run_copyscape(creds, body)
+        if plag.copyleaks_configured(creds):
+            public = (creds.resolve("SWITCHBOARD_PUBLIC_URL", secret=False) or "").rstrip("/")
+            if not public:
+                state["copyleaks"] = {"status": "error", "provider": "copyleaks",
+                                      "error": "set SWITCHBOARD_PUBLIC_URL for the result webhook"}
+            else:
+                scan_id = plag.new_scan_id(job_id)
+                hook = f"{public}/api/plagiarism/copyleaks/{scan_id}?status={{{{STATUS}}}}"
+                state["copyleaks"] = await plag.submit_copyleaks(
+                    creds, scan_id=scan_id, text=body, webhook_url=hook)
+        meta["plagiarism"] = state
+        job.preview_meta = meta
+        await ctx.session.flush()
+    return {"ok": True, "plagiarism": state, "signal": plag.signal_text(state)}
+
+
+@router.post("/plagiarism/copyleaks/{scan_id}")
+async def plagiarism_copyleaks_webhook(request: Request, scan_id: str) -> dict[str, Any]:
+    """PUBLIC webhook — Copyleaks POSTs a scan's completed/error result here. The
+    job is found via the scan id (which embeds the job id + an unguessable token);
+    no auth by design, the scan id is the capability. Always returns 200 quickly."""
+    from sqlalchemy import select
+
+    from .. import plagiarism as plag
+    from ..db.models import ContentJob
+    job_id = plag.job_id_from_scan(scan_id)
+    if job_id is None:
+        raise HTTPException(status_code=404, detail="unknown scan")
+    try:
+        payload = await request.json()
+    except Exception:  # noqa: BLE001
+        payload = {}
+    status_q = request.query_params.get("status", "")
+    async with RunContext.open() as ctx:
+        job = (await ctx.session.execute(
+            select(ContentJob).where(ContentJob.id == job_id))).scalar_one_or_none()
+        if job is None:
+            raise HTTPException(status_code=404, detail="unknown scan")
+        meta = dict(job.preview_meta or {})
+        state = dict(meta.get("plagiarism") or {})
+        submitted = state.get("copyleaks") or {}
+        if submitted.get("scan_id") and submitted.get("scan_id") != scan_id:
+            raise HTTPException(status_code=409, detail="scan id mismatch")
+        if status_q and status_q.lower() != "completed":
+            state["copyleaks"] = {"status": "error", "provider": "copyleaks",
+                                  "scan_id": scan_id, "error": f"copyleaks reported: {status_q}"}
+        else:
+            state["copyleaks"] = {**plag.parse_copyleaks_result(payload), "scan_id": scan_id}
+        meta["plagiarism"] = state
+        job.preview_meta = meta
+        await ctx.session.flush()
+    return {"ok": True}
 
 
 def _image_query(trend: Any, title: str) -> str:
