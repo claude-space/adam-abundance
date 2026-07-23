@@ -1391,10 +1391,10 @@ async def test_session_trends_happy_path_flags_and_writes(monkeypatch):
     week_start = iso_week_start(date.today()) - timedelta(days=7)
     this_days = [week_start + timedelta(days=i) for i in range(7)]
     prev_days = [d - timedelta(days=7) for d in this_days]
-    this_rows = [{"date": d.isoformat(), "visits": 200, "averageEngagedDepth": 10,
-                  "averageEngagedDuration": 30} for d in this_days]
-    prev_rows = [{"date": d.isoformat(), "visits": 100, "averageEngagedDepth": 10,
-                  "averageEngagedDuration": 30} for d in prev_days]
+    this_rows = [{"date": d.isoformat(), "visits": 200, "views": 240, "sessions": 180,
+                  "averageEngagedDepth": 10, "averageEngagedDuration": 30} for d in this_days]
+    prev_rows = [{"date": d.isoformat(), "visits": 100, "views": 120, "sessions": 90,
+                  "averageEngagedDepth": 10, "averageEngagedDuration": 30} for d in prev_days]
 
     patch_sentinel(monkeypatch, SimpleNamespace())  # construction succeeds; _sentinel_daily faked
     ctx = make_ctx(creds_values={"SENTINEL_API_KEY": "k"})

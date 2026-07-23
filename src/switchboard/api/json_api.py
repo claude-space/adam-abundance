@@ -1677,39 +1677,50 @@ async def expenditure_api(request: Request) -> dict[str, Any]:
 
 # --- Session trends ---------------------------------------------------------------
 
-_ST_METRIC_MAP = {"visits": "sessions", "averageEngagedDepth": "avd"}
+_ST_METRIC_MAP = {"sessions": "sessions", "views": "views", "visits": "visits",
+                  "averageEngagedDepth": "avd"}
 _WD = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def _session_trend_spa(p: dict[str, Any]) -> dict[str, Any]:
     """Pivot a stored session_trends payload into the SPA's day-major shape.
-    views/visits have no distinct source → null (SPA renders placeholders)."""
+    Sentinel supplies sessions, views, visits, and averageEngagedDepth as
+    distinct metrics — all four are surfaced (older payloads predating the
+    sessions/views pull simply leave those null)."""
     from datetime import date as _date
     metrics = p.get("metrics") or {}
-    visits = metrics.get("visits") or {}
-    avd = metrics.get("averageEngagedDepth") or {}
+    m_sessions = metrics.get("sessions") or {}
+    m_views = metrics.get("views") or {}
+    m_visits = metrics.get("visits") or {}
+    m_avd = metrics.get("averageEngagedDepth") or {}
     iso = p.get("iso_week") or ""
     try:
         week_no = int(str(iso).split("W")[-1])
     except ValueError:
         week_no = 0
-    vser = visits.get("series") or []
-    aser = avd.get("series") or []
+    ss = m_sessions.get("series") or []
+    vw = m_views.get("series") or []
+    vs = m_visits.get("series") or []
+    ad = m_avd.get("series") or []
+
+    def _val(ser: list, i: int) -> Any:
+        return (ser[i] or {}).get("value") if i < len(ser) else None
+
+    def _date_at(i: int) -> str | None:
+        for ser in (ss, vw, vs, ad):
+            if i < len(ser) and (ser[i] or {}).get("date"):
+                return (ser[i] or {}).get("date")
+        return None
+
     days = []
     for i in range(7):
-        d_iso = None
-        if i < len(vser):
-            d_iso = (vser[i] or {}).get("date")
-        if d_iso is None and i < len(aser):
-            d_iso = (aser[i] or {}).get("date")
+        d_iso = _date_at(i)
         try:
             lbl = _WD[_date.fromisoformat(d_iso).weekday()] if d_iso else _WD[i]
         except (ValueError, TypeError):
             lbl = _WD[i]
-        days.append({"d": lbl, "date": d_iso,
-                     "sessions": (vser[i] or {}).get("value") if i < len(vser) else None,
-                     "views": None, "visits": None,
-                     "avd": (aser[i] or {}).get("value") if i < len(aser) else None})
+        days.append({"d": lbl, "date": d_iso, "sessions": _val(ss, i), "views": _val(vw, i),
+                     "visits": _val(vs, i), "avd": _val(ad, i)})
     thr = float(p.get("threshold_pct") or 25.0)
 
     def r1(v: Any) -> float | None:
@@ -1728,10 +1739,10 @@ def _session_trend_spa(p: dict[str, Any]) -> dict[str, Any]:
                       "date": f.get("date"), "note": note})
     return {"brand": p.get("brand"), "iso_week": week_no, "iso_week_label": iso,
             "week_start": p.get("week_start"), "threshold_pct": thr,
-            "totals": {"sessions": visits.get("weekly"), "views": None, "visits": None,
-                       "avd": r1(avd.get("weekly"))},
-            "wow": {"sessions": r1(visits.get("wow_pct")), "views": None, "visits": None,
-                    "avd": r1(avd.get("wow_pct"))},
+            "totals": {"sessions": m_sessions.get("weekly"), "views": m_views.get("weekly"),
+                       "visits": m_visits.get("weekly"), "avd": r1(m_avd.get("weekly"))},
+            "wow": {"sessions": r1(m_sessions.get("wow_pct")), "views": r1(m_views.get("wow_pct")),
+                    "visits": r1(m_visits.get("wow_pct")), "avd": r1(m_avd.get("wow_pct"))},
             "series": days, "flags": flags}
 
 
