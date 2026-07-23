@@ -11,10 +11,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-# Metrics we trend. Sentinel `traffic` daily rows expose these keys; the
-# ``average*`` metrics are per-day averages (rolled up as a mean of active
-# days), ``visits`` is a count (summed for the weekly total).
-DEFAULT_METRICS: tuple[str, ...] = ("visits", "averageEngagedDepth", "averageEngagedDuration")
+# Metrics we trend. Sentinel `traffic` daily rows expose these as distinct keys;
+# the ``average*`` metrics are per-day averages (rolled up as a mean of active
+# days), the rest (``sessions``/``views``/``visits``) are counts (summed for the
+# weekly total).
+DEFAULT_METRICS: tuple[str, ...] = (
+    "sessions", "views", "visits", "averageEngagedDepth", "averageEngagedDuration")
 _AVG_PREFIX = "average"
 
 
